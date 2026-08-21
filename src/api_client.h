@@ -64,4 +64,10 @@ std::string mock_flight_data();
 
 ParseResult parse_flight_offers(const std::string& payload);
 
+// Deep link to the booking page for one offer, or "" when the dates are
+// incomplete. Exposed so --test-alert builds its sample the same way a real
+// offer is built, rather than carrying a second copy of the URL format that
+// could drift out of step with this one.
+std::string booking_url(const FlightOffer& offer);
+
 }  // namespace api

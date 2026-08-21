@@ -362,13 +362,24 @@ int run_test_alert(const Config& config) {
         return 1;
     }
 
+    // A realistic offer, not a placeholder: the point of this flag is to show
+    // exactly what a real alert will look like. It predates the move to
+    // Ryanair, and for a while it still described FRA->IST -- an airport
+    // Ryanair does not serve, to a country now out of scope -- with no city
+    // names and no booking link, because those fields did not exist when it
+    // was written. That made the one command meant to prove the setup works
+    // misrepresent the thing it was proving.
     FlightOffer offer;
-    offer.origin         = "FRA";
-    offer.destination    = "IST";
-    offer.departure_date = date_offset_utc(30);
-    offer.return_date    = date_offset_utc(33);
-    offer.currency       = "EUR";
-    offer.price          = 89.0;
+    offer.origin              = "CGN";
+    offer.destination         = "BCN";
+    offer.origin_city         = "Cologne";
+    offer.destination_city    = "Barcelona";
+    offer.destination_country = "Spain";
+    offer.departure_date      = date_offset_utc(30);
+    offer.return_date         = date_offset_utc(33);
+    offer.currency            = "EUR";
+    offer.price               = 89.0;
+    offer.booking_link        = api::booking_url(offer);
 
     db::PriceUpdate update;
     update.previous_lowest = 164.5;

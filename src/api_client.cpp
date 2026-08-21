@@ -61,6 +61,8 @@ std::string date_part(const std::string& timestamp) {
     return date;
 }
 
+}  // namespace
+
 // Ryanair's booking page accepts the trip as query parameters, so an alert can
 // link straight at the fare rather than making you search for it again.
 std::string booking_url(const FlightOffer& offer) {
@@ -73,8 +75,6 @@ std::string booking_url(const FlightOffer& offer) {
            "&destinationIata=" + offer.destination +
            "&isReturn=true";
 }
-
-}  // namespace
 
 std::string fetch_flight_data(const Settings& settings, const SearchParams& params) {
     if (settings.use_mock) return mock_flight_data();
