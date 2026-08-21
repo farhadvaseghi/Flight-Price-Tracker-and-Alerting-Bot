@@ -114,8 +114,14 @@ jobs:
 
           # Region filtering is the piece with no other coverage, so assert the
           # airport table actually loaded rather than silently coming up empty.
-          echo "$output" | grep -qE "region   : [0-9]+ airports" \
-            || { echo "::error::region table did not load"; exit 1; }
+          echo "$output" | grep -qE "region   : [0-9]+ countries" \
+            || { echo "::error::region allowlist did not load"; exit 1; }
+
+          # The mock includes a Moroccan destination purely to prove the region
+          # filter fires. If this line disappears, the filter has stopped working
+          # and non-European destinations would flow through to alerts.
+          echo "$output" | grep -q "outside region: Morocco" \
+            || { echo "::error::region filter did not reject Morocco"; exit 1; }
 
           echo "$output" | grep -q "shutting down cleanly" \
             || { echo "::error::did not shut down cleanly"; exit 1; }
