@@ -99,12 +99,22 @@ jobs:
         shell: bash
         run: |
           ${{ matrix.binary }} --help
-          output=$(${{ matrix.binary }} --once --dry-run)
+
+          # One origin, so the expected counts do not move when the default
+          # origin list changes. The mock payload holds six entries: two usable
+          # (IST, LIS), one outside the region (JFK), and three malformed.
+          output=$(${{ matrix.binary }} --once --dry-run --origins=FRA)
           echo "$output"
-          # The mock payload holds three usable offers and three malformed
-          # ones, so anything else means the parser or the store regressed.
-          echo "$output" | grep -q "3 parsed, 3 skipped, 3 stored" \
-            || { echo "::error::unexpected cycle result"; exit 1; }
+
+          expected="1 calls, 2 offers, 1 out of region, 3 rejected, 1 under cap, 0 alerts"
+          echo "$output" | grep -q "$expected" \
+            || { echo "::error::sweep result changed; expected: $expected"; exit 1; }
+
+          # Region filtering is the piece with no other coverage, so assert the
+          # airport table actually loaded rather than silently coming up empty.
+          echo "$output" | grep -qE "region   : [0-9]+ airports" \
+            || { echo "::error::region table did not load"; exit 1; }
+
           echo "$output" | grep -q "shutting down cleanly" \
             || { echo "::error::did not shut down cleanly"; exit 1; }
 
