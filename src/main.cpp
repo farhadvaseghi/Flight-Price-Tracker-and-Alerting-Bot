@@ -1,67 +1,76 @@
-// Step 2 harness: exercises the SQLite persistence layer end to end.
+// Step 3 harness: parses the mock API response and feeds it into the store.
 // This file gets replaced by the real application loop in Step 5.
 
 #include <cstdio>
+#include <iomanip>
 #include <iostream>
 
+#include "api_client.h"
 #include "database.h"
 #include "flight.h"
 
-namespace {
-
-void report(const char* label, const db::PriceUpdate& update) {
-    std::cout << label << "\n"
-              << "    price          : " << update.current_price << '\n'
-              << "    first sighting : " << (update.first_sighting ? "yes" : "no") << '\n'
-              << "    new low        : " << (update.new_low ? "YES -> alert" : "no") << '\n';
-    if (!update.first_sighting) {
-        std::cout << "    previous low   : " << update.previous_lowest << '\n';
-    }
-    std::cout << '\n';
-}
-
-FlightOffer make_offer(double price) {
-    FlightOffer offer;
-    offer.origin         = "FRA";
-    offer.destination    = "TBS";
-    offer.departure_date = "2026-11-14";
-    offer.airline        = "Turkish Airlines";
-    offer.currency       = "EUR";
-    offer.price          = price;
-    return offer;
-}
-
-}  // namespace
-
 int main() {
-    const char* kPath = "step2_test.db";
-    std::remove(kPath);  // start from a clean slate every run
+    const char* kPath = "step3_test.db";
+    std::remove(kPath);
+
+    std::cout << std::fixed << std::setprecision(2);
 
     try {
         db::Database store(kPath);
         store.initialize();
 
-        report("1. first ever observation at 412.50",
-               store.record_price(make_offer(412.50)));
+        // --- pass 1: cold database, everything is a first sighting ---
+        const std::string    payload = api::fetch_flight_data();
+        const api::ParseResult parsed = api::parse_flight_offers(payload);
 
-        report("2. price rises to 480.00",
-               store.record_price(make_offer(480.00)));
+        std::cout << "parsed " << parsed.offers.size() << " usable offers, "
+                  << parsed.problems.size() << " rejected\n\n";
 
-        report("3. price drops to 389.99",
-               store.record_price(make_offer(389.99)));
+        std::cout << "rejected entries:\n";
+        for (const std::string& problem : parsed.problems) {
+            std::cout << "  - " << problem << '\n';
+        }
+        std::cout << '\n';
 
-        report("4. identical price seen again (389.99)",
-               store.record_price(make_offer(389.99)));
+        std::cout << "pass 1 (cold database):\n";
+        for (const FlightOffer& offer : parsed.offers) {
+            const db::PriceUpdate update = store.record_price(offer);
+            std::cout << "  " << offer.origin << "->" << offer.destination
+                      << ' ' << offer.departure_date
+                      << "  " << offer.price << ' ' << offer.currency
+                      << "  [" << offer.airline << "]"
+                      << (update.first_sighting ? "  (new route)" : "")
+                      << (update.new_low ? "  (NEW LOW)" : "") << '\n';
+        }
 
-        report("5. drops by a third of a cent (389.9867) - FP noise",
-               store.record_price(make_offer(389.9867)));
+        // --- pass 2: same data again, so nothing should look like a drop ---
+        std::cout << "\npass 2 (identical data replayed):\n";
+        for (const FlightOffer& offer : parsed.offers) {
+            const db::PriceUpdate update = store.record_price(offer);
+            std::cout << "  " << offer.origin << "->" << offer.destination
+                      << "  first_sighting=" << (update.first_sighting ? "y" : "n")
+                      << "  new_low=" << (update.new_low ? "y" : "n") << '\n';
+        }
 
-        const auto low = store.lowest_price("FRA", "TBS", "2026-11-14");
-        std::cout << "stored lowest_price : " << (low ? *low : -1.0) << '\n';
+        // --- pass 3: one genuine drop ---
+        std::cout << "\npass 3 (FRA->TBS 2026-11-14 drops to 355.00):\n";
+        FlightOffer cheaper = parsed.offers.front();
+        cheaper.price = 355.00;
+        const db::PriceUpdate update = store.record_price(cheaper);
+        std::cout << "  previous low " << update.previous_lowest
+                  << " -> " << update.current_price
+                  << "  new_low=" << (update.new_low ? "YES" : "no") << '\n';
 
-        const auto missing = store.lowest_price("FRA", "JFK", "2026-11-14");
-        std::cout << "unknown route       : "
-                  << (missing ? "unexpectedly present" : "nullopt (correct)") << '\n';
+        // --- malformed input must not throw ---
+        std::cout << "\nrobustness:\n";
+        for (const char* bad : {"", "<html>502 Bad Gateway</html>", "{\"offers\": 42}",
+                                "{\"offers\": [null, 7]}"}) {
+            const api::ParseResult r = api::parse_flight_offers(bad);
+            std::cout << "  " << std::setw(30) << std::left
+                      << (std::string(bad).empty() ? "(empty body)" : bad)
+                      << " -> " << r.offers.size() << " offers, "
+                      << r.problems.size() << " problems\n";
+        }
 
     } catch (const db::Error& e) {
         std::cerr << "database error: " << e.what() << '\n';

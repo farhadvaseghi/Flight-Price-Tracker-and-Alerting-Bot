@@ -85,6 +85,7 @@ endif()
 add_executable(flight_tracker
     src/main.cpp
     src/database.cpp
+    src/api_client.cpp
 )
 
 target_link_libraries(flight_tracker PRIVATE
