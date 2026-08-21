@@ -36,7 +36,10 @@ double retry_delay_seconds(const cpr::Response& response) {
     const auto header = response.header.find("retry-after");
     if (header != response.header.end()) {
         try {
-            return std::min(std::stod(header->second), kCap);
+            // Parenthesised so a windows.h min() macro cannot expand this.
+            // NOMINMAX is set for our targets too, but this stays correct even
+            // for someone compiling these sources without it.
+            return (std::min)(std::stod(header->second), kCap);
         } catch (const std::exception&) {
             // fall through to the body
         }
@@ -45,7 +48,7 @@ double retry_delay_seconds(const cpr::Response& response) {
     const json body = json::parse(response.text, nullptr, /*allow_exceptions=*/false);
     if (!body.is_discarded() && body.is_object() && body.contains("retry_after")) {
         const json& value = body.at("retry_after");
-        if (value.is_number()) return std::min(value.get<double>(), kCap);
+        if (value.is_number()) return (std::min)(value.get<double>(), kCap);
     }
 
     return kFallback;

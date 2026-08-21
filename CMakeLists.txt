@@ -95,6 +95,13 @@ target_link_libraries(flight_tracker PRIVATE
     sqlite3
 )
 
+if(WIN32)
+    # curl drags in windows.h, which defines min and max as macros and breaks
+    # any std::min / std::max call that follows. MSVC reports it as
+    # "C2589: illegal token on right side of '::'".
+    target_compile_definitions(flight_tracker PRIVATE NOMINMAX)
+endif()
+
 # Drop the binary in build/bin regardless of generator/config.
 set_target_properties(flight_tracker PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY         ${CMAKE_BINARY_DIR}/bin
