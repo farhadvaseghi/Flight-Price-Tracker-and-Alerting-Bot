@@ -2,9 +2,9 @@ name: track
 
 on:
   schedule:
-    # Every 6 hours. With 8 origins that is 32 calls a day, far inside the
-    # documented 200-per-hour limit. Raising the frequency or the origin count
-    # multiplies both numbers.
+    # Every 6 hours. With 10 origins and up to 5 pages each that is at most
+    # 200 requests a sweep, paced 250ms apart, against an endpoint that owes us
+    # nothing. Raising the frequency or the origin count multiplies that.
     - cron: "0 */6 * * *"
   workflow_dispatch:      # manual "run now" button
     inputs:
@@ -47,14 +47,12 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
-          TRAVELPAYOUTS_TOKEN: ${{ secrets.TRAVELPAYOUTS_TOKEN }}
         run: |
-          # Without credentials the tracker falls back to its mock payload,
-          # which would write nonsense into the real price history. Better to
-          # say so plainly than to record fiction.
-          if [ -z "$TRAVELPAYOUTS_TOKEN" ]; then
-            echo "::warning::TRAVELPAYOUTS_TOKEN is not set; skipping the sweep"
-            exit 0
+          # The fare API needs no credential, so the sweep can always run and
+          # build price history. Only the alerting needs secrets -- without them
+          # a new low would be found and then silently dropped, so say so.
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "::warning::Telegram secrets are not set; recording prices but not alerting"
           fi
           build/bin/flight_tracker --once ${{ inputs.dry_run && '--dry-run' || '' }}
 

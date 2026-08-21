@@ -12,13 +12,16 @@
 // departure_date and return_date belong to the same trip and `price` is the
 // total for both legs.
 struct FlightOffer {
-    std::string origin;          // IATA code, e.g. "FRA"
-    std::string destination;     // IATA code, e.g. "IST"
+    std::string origin;          // IATA code, e.g. "CGN"
+    std::string destination;     // IATA code, e.g. "AGP"
+    std::string origin_city;     // "Cologne"
+    std::string destination_city;     // "Malaga"
+    std::string destination_country;  // "Spain"
     std::string departure_date;  // ISO-8601 date, "YYYY-MM-DD"
     std::string return_date;     // empty for a one-way offer
     std::string currency;        // ISO-4217, e.g. "EUR"
     double      price = 0.0;     // total for the whole trip
-    std::string booking_link;    // deep link supplied by the API, may be empty
+    std::string booking_link;    // constructed, may be empty
 
     // Nights between the two legs, or 0 when one-way / dates unparseable.
     int nights() const;

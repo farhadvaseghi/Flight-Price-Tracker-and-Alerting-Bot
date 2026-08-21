@@ -9,8 +9,6 @@
 #include <sstream>
 #include <thread>
 
-#include "geo.h"
-
 namespace notify {
 namespace {
 
@@ -152,18 +150,17 @@ std::string build_price_drop_message(const FlightOffer&     offer,
     const double percent =
         update.previous_lowest > 0.0 ? (saving / update.previous_lowest) * 100.0 : 0.0;
 
-    const geo::Place from = geo::lookup(offer.origin);
-    const geo::Place to   = geo::lookup(offer.destination);
-
     std::ostringstream out;
     out << std::fixed << std::setprecision(0);
 
-    // Every interpolated value goes through html_escape. City names come from
-    // our own table, but the booking link comes from the API and is not ours
-    // to trust.
-    out << "\xE2\x9C\x88\xEF\xB8\x8F <b>" << html_escape(from.city)
-        << " \xE2\x86\x92 " << html_escape(to.city);
-    if (!to.country.empty()) out << ", " << html_escape(to.country);
+    // Every interpolated value goes through html_escape. All of it -- city
+    // names, country, the booking link -- now comes from the API, so none of
+    // it is ours to trust.
+    out << "\xE2\x9C\x88\xEF\xB8\x8F <b>" << html_escape(offer.origin_city)
+        << " \xE2\x86\x92 " << html_escape(offer.destination_city);
+    if (!offer.destination_country.empty()) {
+        out << ", " << html_escape(offer.destination_country);
+    }
     out << "</b>\n";
 
     out << "<b>" << html_escape(money(update.current_price, offer.currency)) << "</b>"

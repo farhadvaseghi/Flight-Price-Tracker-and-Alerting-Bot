@@ -2,20 +2,23 @@
 
 [![build](https://github.com/farhadvaseghi/Flight-Price-Tracker-and-Alerting-Bot/actions/workflows/build.yml/badge.svg)](https://github.com/farhadvaseghi/Flight-Price-Tracker-and-Alerting-Bot/actions/workflows/build.yml)
 
-Sweeps German airports for cheap return trips to Europe and Turkey, remembers the
+Sweeps German airports for cheap return trips around Europe, remembers the
 lowest price ever seen for each city pair in SQLite, and pings a Telegram
 channel when a new low lands under your price cap.
 
-Prices come from the **Travelpayouts Data API** (`city-directions`), which
-returns the cheapest cached fare to every destination reachable from one origin
-in a single call -- so a sweep of eight German airports costs eight requests,
-not hundreds. Destinations outside Europe and Turkey are filtered out locally
-against a bundled airport table, which costs no requests at all.
+Fares come from **Ryanair's public fare finder** -- the JSON endpoint their own
+website calls. It needs no API key, no account and no signup, which is what
+makes the whole system free to run. One request returns 20 fares from one
+origin, filtered by date window and trip length server-side.
 
-> Amadeus' Self-Service API was the original data source. It was decommissioned
-> on 17 July 2026 and existing keys stopped working, so the project moved to
-> Travelpayouts. The swap touched only `api_client.*` -- the store, the region
-> filter and the alerting were unaffected.
+**Two things to know about that choice.** The endpoint is undocumented, so it
+can change without notice -- `--probe` exists to tell you when it has. And it
+only knows Ryanair's own network, which covers Europe well and Turkey not at
+all, so Turkey is deliberately out of scope.
+
+> Earlier versions used Amadeus, then Travelpayouts. Amadeus decommissioned its
+> free Self-Service tier on 17 July 2026; Travelpayouts works but requires an
+> affiliate signup. Each swap touched only `api_client.*`.
 
 ## Stack
 
@@ -47,14 +50,13 @@ minutes; later builds are incremental.
 
 ## Run
 
-No credentials? It falls back to a built-in mock payload, so the whole pipeline
-runs offline:
+Run fully offline against a built-in payload:
 
 ```
-flight_tracker --once --dry-run
+flight_tracker --once --dry-run --mock
 ```
 
-With an API token, check the live path before trusting it:
+Check the live endpoint any time -- no credential needed:
 
 ```
 flight_tracker --probe
@@ -77,7 +79,6 @@ Configuration is layered, later sources winning:
 |----------------|-----------------------------|------------------------|
 | Bot token      | — (secret, env only)         | `TELEGRAM_BOT_TOKEN`   |
 | Chat id        | `telegram_chat_id`          | `TELEGRAM_CHAT_ID`     |
-| Flight API token | — (secret, env only)       | `TRAVELPAYOUTS_TOKEN`  |
 | Database       | `database_path`             | `FLIGHT_TRACKER_DB`    |
 | Origins        | `origins`                   | —                      |
 | Price cap      | `price_cap`                 | —                      |
@@ -92,11 +93,11 @@ set in the file at all: anyone holding the bot token can post as your bot.
 ## Architecture
 
 ```
-fetch_flight_data()      api_client.cpp   city-directions, 1 request per origin
+fetch_flight_data()      api_client.cpp   Ryanair roundTripFares, paged
         |
 parse_flight_offers()    api_client.cpp   -> vector<FlightOffer>, non-EU/TR dropped
         |
-geo::in_region()         geo.cpp          bundled airport table, no API calls
+geo::in_region()         geo.cpp          country allowlist, no API calls
         |
 record_price()           database.cpp     one transaction: new low for this city pair?
         |
@@ -108,8 +109,8 @@ main loop                main.cpp         sweep, timer, signals, per-cycle recov
 | File            | Responsibility                                        |
 |-----------------|-------------------------------------------------------|
 | `flight.h/.cpp` | `FlightOffer`, the type shared by every layer          |
-| `geo.*`         | Europe/Turkey airport allowlist and place names        |
-| `api_client.*`  | fetching, defensive JSON parsing, date/length filters  |
+| `geo.*`         | European country allowlist for filtering destinations  |
+| `api_client.*`  | fetching, paging, defensive JSON parsing               |
 | `database.*`    | SQLite persistence, new-low detection per city pair    |
 | `notifier.*`    | Telegram delivery, HTML escaping, retries              |
 | `main.cpp`      | configuration, sweep loop, graceful shutdown           |
@@ -164,7 +165,9 @@ Add three repository secrets (Settings -> Secrets and variables -> Actions):
 |----------------------|-----------------------------------------------------|
 | `TELEGRAM_BOT_TOKEN` | Message @BotFather, `/newbot`, copy the token       |
 | `TELEGRAM_CHAT_ID`   | `@your_channel`, or a numeric id for a private chat |
-| `TRAVELPAYOUTS_TOKEN` | travelpayouts.com, free signup, token is in your profile |
+
+No flight-API credential appears here because the fare endpoint does not have
+one.
 
 Confirm the Telegram side works before waiting on a real price drop:
 
@@ -181,13 +184,14 @@ with permission to post, and use `@channelname` as the chat id. For a private
 chat instead, message the bot once and read the numeric id from
 `https://api.telegram.org/bot<TOKEN>/getUpdates`.
 
-Without `TRAVELPAYOUTS_TOKEN` the scheduled job warns and exits rather than
-writing mock prices into the real history.
+The fare API needs no credential, so the sweep always runs and builds price
+history. Without the Telegram secrets it records prices but warns that it cannot
+alert.
 
-**Request arithmetic.** One request covers one origin, so eight origins every
-six hours is 32 requests a day -- far inside the documented 200-per-hour limit.
-Fares do not move hourly, and the API serves cached data anyway, so polling
-harder buys nothing.
+**Request arithmetic.** A page is 20 fares, capped at 5 pages per origin, so a
+sweep of 10 origins is at most 200 requests, paced 250ms apart. Four sweeps a
+day is well-mannered for an endpoint that owes us nothing. Fares do not move
+hourly, so polling harder buys nothing.
 
 Two honest limits: GitHub runs scheduled jobs late under load and occasionally
 skips one, which is irrelevant at this cadence; and scheduled workflows are
@@ -206,7 +210,7 @@ full libcurl build again.
 
 - [x] Build system, SQLite store, JSON parsing, Telegram alerting, sweep loop
 - [x] CI on Windows/MSVC and Linux/GCC
-- [x] Travelpayouts `city-directions` integration
-- [x] Europe/Turkey region filter
+- [x] Ryanair fare-finder integration, keyless and paged
+- [x] European region filter by country
 - [x] Scheduled sweeps on GitHub Actions with committed price history
-- [ ] Verify the live API path with `--probe` (needs a token)
+- [x] Live path verified: 18 real offers parsed from CGN, 36 city pairs stored

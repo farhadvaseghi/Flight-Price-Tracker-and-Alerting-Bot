@@ -1,9 +1,9 @@
 {
-  "_comment": "Copy to config.json and edit. Secrets are environment-only and cannot be set here: TELEGRAM_BOT_TOKEN and TRAVELPAYOUTS_TOKEN.",
+  "_comment": "Copy to config.json and edit. The Telegram bot token is a secret and is read from TELEGRAM_BOT_TOKEN only - never put it here. The fare API needs no credential at all.",
 
   "telegram_chat_id": "@your_channel_name",
 
-  "origins": ["FRA", "MUC", "BER", "DUS", "HAM", "CGN", "STR", "HAJ"],
+  "origins": ["BER", "CGN", "HHN", "NUE", "FMM", "HAM", "FKB", "FMO", "PAD", "BRE"],
 
   "price_cap": 100,
   "search_days": 90,

@@ -94,21 +94,21 @@ jobs:
           fi
 
       # A binary that links is not the same as a binary that runs. --dry-run
-      # keeps this offline and posts nothing: no Telegram, no API, no network.
+      # and --mock keep this fully offline: no Telegram, no fare API, no network.
       - name: Smoke test
         shell: bash
         run: |
           ${{ matrix.binary }} --help
 
-          # One origin, so the expected counts do not move when the default
-          # origin list changes. The mock payload holds seven entries: two
-          # usable (IST, LIS), two outside the region (JFK and an entry with no
-          # destination), one trip too long, one departing beyond the window,
-          # and one with an unparseable price.
-          output=$(${{ matrix.binary }} --once --dry-run --origins=FRA)
+          # --mock is essential: CI must not depend on a live third-party
+          # endpoint. One origin keeps the counts stable when the default origin
+          # list changes. The mock payload holds five fares: two usable (Malaga
+          # under the cap, Athens over it), one outside the region, one with no
+          # price and one with no arrival airport.
+          output=$(${{ matrix.binary }} --once --dry-run --mock --origins=CGN)
           echo "$output"
 
-          expected="1 calls, 2 offers, 4 filtered, 1 malformed, 1 under cap, 0 alerts"
+          expected="1 calls, 2 offers, 1 filtered, 2 malformed, 1 under cap, 0 alerts"
           echo "$output" | grep -q "$expected" \
             || { echo "::error::sweep result changed; expected: $expected"; exit 1; }
 

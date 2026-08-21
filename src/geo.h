@@ -1,29 +1,29 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace geo {
 
-struct Place {
-    std::string city;          // "Istanbul"
-    std::string country;       // "Turkey"
-    std::string country_code;  // ISO 3166-1 alpha-2, "TR"
-};
-
-// True when `iata` is an airport in Europe or Turkey that we care about.
+// True when `country` is in the region we track.
 //
-// This is an allowlist, deliberately. The API returns destinations worldwide,
-// and resolving each one's country through a lookup endpoint would spend a
-// request on every new airport. A bundled table costs nothing, works offline,
-// and treats anything unknown as "not our region" -- which conveniently also
-// keeps obscure airfields out of the alerts.
-bool in_region(const std::string& iata);
+// The fare API labels every airport with its country, so this is a country
+// allowlist rather than a list of airports. That is both less to maintain and
+// more accurate than guessing from IATA codes -- and it is what filters out the
+// Moroccan and Jordanian destinations the API happily returns alongside the
+// European ones.
+//
+// Turkey is deliberately absent: Ryanair has no Turkish routes, so including it
+// would advertise coverage that cannot exist.
+bool in_region(const std::string& country);
 
-// Human-readable place for an allowlisted IATA code. Returns the code itself
-// as the city when unknown, so a message never renders as an empty string.
-Place lookup(const std::string& iata);
+// Country names seen in responses that are not in the allowlist. Recorded so a
+// missing entry shows up as a log line instead of silently dropping a
+// destination forever.
+void note_unknown(const std::string& country);
+std::vector<std::string> unknown_countries();
 
-// Number of airports in the table, for diagnostics.
+// Number of countries in the allowlist, for diagnostics.
 std::size_t size();
 
 }  // namespace geo

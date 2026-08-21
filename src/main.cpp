@@ -1,5 +1,5 @@
 // Flight Price Tracker - sweeps German airports for cheap return trips to
-// Europe and Turkey, keeps the lowest price ever seen per city pair in SQLite,
+// Europe, keeps the lowest price ever seen per city pair in SQLite,
 // and alerts a Telegram channel when a new low lands under the price cap.
 
 #include <atomic>
@@ -39,7 +39,7 @@ extern "C" void handle_signal(int) {
 
 struct Config {
     notify::Telegram         alerts;                   // bot token is secret
-    api::Credentials         flights;                  // API token is secret
+    api::Settings            flights;                  // no credential needed
     std::string              database_path = "flights.db";
     std::vector<std::string> origins;                  // German airports
     int         search_days      = 90;                 // how far ahead to look
@@ -58,10 +58,12 @@ std::string env_or(const char* name, const std::string& fallback) {
     return (value && *value) ? std::string(value) : fallback;
 }
 
-// Busiest German airports. More origins means more coverage but also more API
-// calls per cycle, which is the free tier's real constraint.
+// German airports Ryanair actually flies from, verified against the live
+// endpoint. Frankfurt, Munich, Dusseldorf and Stuttgart are deliberately
+// absent: Ryanair does not serve them, so querying them returns nothing and
+// only costs requests.
 std::vector<std::string> default_origins() {
-    return {"FRA", "MUC", "BER", "DUS", "HAM", "CGN", "STR", "HAJ"};
+    return {"BER", "CGN", "HHN", "NUE", "FMM", "HAM", "FKB", "FMO", "PAD", "BRE"};
 }
 
 // Precedence: built-in defaults < config.json < environment < CLI flags.
@@ -110,7 +112,6 @@ Config load_config(int argc, char** argv) {
     config.alerts.chat_id        = env_or("TELEGRAM_CHAT_ID", config.alerts.chat_id);
     config.alerts.api_base       = env_or("TELEGRAM_API_BASE", config.alerts.api_base);
     config.database_path         = env_or("FLIGHT_TRACKER_DB", config.database_path);
-    config.flights.token         = env_or("TRAVELPAYOUTS_TOKEN", config.flights.token);
     config.flights.host          = env_or("FLIGHT_API_HOST", config.flights.host);
 
     for (int i = 1; i < argc; ++i) {
@@ -118,6 +119,7 @@ Config load_config(int argc, char** argv) {
         if (arg == "--once")         config.run_once = true;
         else if (arg == "--dry-run") config.dry_run  = true;
         else if (arg == "--probe")   config.probe    = true;
+        else if (arg == "--mock")    config.flights.use_mock = true;
         else if (arg == "--test-alert") config.test_alert = true;
         else if (arg.rfind("--cap=", 0) == 0) {
             try { config.price_cap = std::stod(arg.substr(6)); }
@@ -139,16 +141,18 @@ Config load_config(int argc, char** argv) {
                 "  --once             run a single sweep and exit\n"
                 "  --dry-run          print alerts instead of posting them\n"
                 "  --probe            make one live API call and dump the raw response\n"
+                "  --test-alert       send one sample alert to Telegram and exit\n"
+                "  --mock             use the built-in payload, make no network calls\n"
                 "  --cap=EUR          only alert below this price (default 100)\n"
                 "  --origins=A,B,C    override the German airports to sweep\n"
                 "  --interval=N       seconds between sweeps (default 21600)\n\n"
                 "environment:\n"
                 "  TELEGRAM_BOT_TOKEN    bot token from @BotFather\n"
                 "  TELEGRAM_CHAT_ID      channel (@name) or numeric chat id\n"
-                "  TRAVELPAYOUTS_TOKEN   Travelpayouts affiliate API token\n"
                 "  FLIGHT_TRACKER_DB     database file (default flights.db)\n\n"
-                "Without an API token the tracker runs against a built-in mock\n"
-                "payload, so the whole pipeline can be exercised offline.\n";
+                "Fares come from Ryanair's public fare finder, which needs no key\n"
+                "and no account. --mock swaps in a built-in payload so the whole\n"
+                "pipeline can be exercised offline.\n";
             std::exit(0);
         } else {
             std::cerr << "warning: ignoring unknown argument '" << arg << "'\n";
@@ -200,96 +204,141 @@ struct CycleStats {
     int below_cap     = 0;
 };
 
-api::SearchParams params_for(const Config& config, const std::string& origin) {
+// The endpoint constrains dates and trip length server-side, so these travel
+// with the request rather than being applied to the response.
+api::SearchParams params_for(const Config& config, const std::string& origin,
+                             int offset) {
     api::SearchParams params;
-    params.origin   = origin;
-    params.currency = "eur";
+    params.origin = origin;
+    // Tomorrow onward: today's departures are not actionable.
+    params.earliest_departure = date_offset_utc(1);
+    params.latest_departure   = date_offset_utc(config.search_days);
+    params.min_nights         = config.min_nights;
+    params.max_nights         = config.max_nights;
+    params.currency           = "EUR";
+    params.offset             = offset;
     return params;
 }
 
-// city-directions cannot constrain dates or trip length in the request, so the
-// narrowing happens after the fetch.
-api::Filters filters_for(const Config& config) {
-    api::Filters filters;
-    // Tomorrow onward: today's departures are not actionable.
-    filters.earliest_departure = date_offset_utc(1);
-    filters.latest_departure   = date_offset_utc(config.search_days);
-    filters.min_nights         = config.min_nights;
-    filters.max_nights         = config.max_nights;
-    return filters;
+// A page holds 20 fares and the endpoint rejects any larger limit, so several
+// requests are needed per origin. Five pages is 100 fares, which in practice
+// covers every destination an airport serves -- the extra fares are repeats of
+// the same city pair on different dates, and only the cheapest is kept anyway.
+//
+// This endpoint is undocumented and free, and owes us nothing, so the pager is
+// capped and paced rather than run flat out.
+constexpr int kMaxPagesPerOrigin   = 5;
+constexpr int kPauseBetweenCallsMs = 250;
+
+// Stores one offer and alerts if it is a new low worth reporting.
+void handle_offer(const Config& config, db::Database& store,
+                  const FlightOffer& offer, CycleStats& stats) {
+    db::PriceUpdate update;
+    try {
+        update = store.record_price(offer);
+        ++stats.stored;
+    } catch (const db::Error& e) {
+        // One bad row must not abort the sweep; the next cycle retries it.
+        log() << "  db error on " << offer.origin << "-" << offer.destination
+              << ": " << e.what() << '\n';
+        return;
+    }
+
+    if (offer.price <= config.price_cap) ++stats.below_cap;
+
+    // Two conditions, deliberately. A record low above the cap is real but not
+    // worth waking you for; a cheap price that is not a record has already been
+    // alerted on.
+    if (!update.new_low || offer.price > config.price_cap) return;
+
+    log() << "  ALERT " << offer.origin << "->" << offer.destination
+          << " (" << offer.destination_city << ")  "
+          << money(update.previous_lowest, offer.currency) << " -> "
+          << money(update.current_price, offer.currency)
+          << "  " << offer.departure_date;
+    if (!offer.return_date.empty()) std::cout << " +" << offer.nights() << "n";
+    std::cout << '\n';
+
+    if (config.dry_run) {
+        ++stats.alerts;
+        return;
+    }
+
+    const notify::SendResult sent =
+        notify::send_price_drop_alert(config.alerts, offer, update);
+
+    if (sent.ok) {
+        ++stats.alerts;
+    } else {
+        // The new low is already committed, so we will not re-alert for it. A
+        // missed notification beats a duplicate storm, and the next genuine
+        // drop still fires.
+        ++stats.failed_alerts;
+        log() << "  alert delivery failed (" << sent.status_code << "): "
+              << sent.error << '\n';
+    }
 }
 
 CycleStats run_cycle(const Config& config, db::Database& store) {
     CycleStats stats;
-    const bool         live    = config.flights.present();
-    const api::Filters filters = filters_for(config);
 
     for (const std::string& origin : config.origins) {
         if (g_shutdown_requested.load(std::memory_order_relaxed)) break;
 
-        const std::string payload =
-            live ? api::fetch_flight_data(config.flights, params_for(config, origin))
-                 : api::mock_flight_data();
-        ++stats.calls;
+        int found = 0;
 
-        const api::ParseResult parsed = api::parse_flight_offers(payload, filters);
-        stats.parsed   += static_cast<int>(parsed.offers.size());
-        stats.filtered += parsed.rejected();
-        stats.skipped  += static_cast<int>(parsed.problems.size());
+        // One page holds 20 fares, so an origin serving 100 destinations needs
+        // five requests. Stop as soon as the endpoint says there is no next
+        // page, and never exceed the cap.
+        for (int page = 0; page < kMaxPagesPerOrigin; ++page) {
+            if (g_shutdown_requested.load(std::memory_order_relaxed)) break;
 
-        if (parsed.offers.empty() && !parsed.problems.empty()) {
-            log() << "  " << origin << ": " << parsed.problems.front() << '\n';
+            if (stats.calls > 0 && !config.flights.use_mock) {
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(kPauseBetweenCallsMs));
+            }
+
+            const std::string payload = api::fetch_flight_data(
+                config.flights, params_for(config, origin, page * api::kPageSize));
+            ++stats.calls;
+
+            const api::ParseResult parsed = api::parse_flight_offers(payload);
+            stats.parsed   += static_cast<int>(parsed.offers.size());
+            stats.filtered += parsed.out_of_region;
+            stats.skipped  += static_cast<int>(parsed.problems.size());
+            found          += static_cast<int>(parsed.offers.size());
+
+            // Only complain about the first page. A later page failing is
+            // usually just the end of the list.
+            if (page == 0 && parsed.offers.empty() && !parsed.problems.empty()) {
+                log() << "  " << origin << ": " << parsed.problems.front() << '\n';
+            }
+
+            for (const FlightOffer& offer : parsed.offers) {
+                handle_offer(config, store, offer, stats);
+            }
+
+            // The mock is a single page by construction.
+            if (!parsed.has_more || config.flights.use_mock) break;
         }
 
-        for (const FlightOffer& offer : parsed.offers) {
-            db::PriceUpdate update;
-            try {
-                update = store.record_price(offer);
-                ++stats.stored;
-            } catch (const db::Error& e) {
-                // One bad row must not abort the sweep; the next cycle retries.
-                log() << "  db error on " << offer.origin << "-" << offer.destination
-                      << ": " << e.what() << '\n';
-                continue;
-            }
-
-            if (offer.price <= config.price_cap) ++stats.below_cap;
-
-            // Two conditions, deliberately. A record low above the cap is real
-            // but not worth waking you for; a cheap price that is not a record
-            // has already been alerted on.
-            if (!update.new_low || offer.price > config.price_cap) continue;
-
-            const geo::Place to = geo::lookup(offer.destination);
-            log() << "  ALERT " << offer.origin << "->" << offer.destination
-                  << " (" << to.city << ")  "
-                  << money(update.previous_lowest, offer.currency) << " -> "
-                  << money(update.current_price, offer.currency)
-                  << "  " << offer.departure_date;
-            if (!offer.return_date.empty()) {
-                std::cout << " +" << offer.nights() << "n";
-            }
-            std::cout << '\n';
-
-            if (config.dry_run) {
-                ++stats.alerts;
-                continue;
-            }
-
-            const notify::SendResult sent =
-                notify::send_price_drop_alert(config.alerts, offer, update);
-
-            if (sent.ok) {
-                ++stats.alerts;
-            } else {
-                // The new low is already committed, so we will not re-alert for
-                // it. A missed notification beats a duplicate storm, and the
-                // next genuine drop still fires.
-                ++stats.failed_alerts;
-                log() << "  alert delivery failed (" << sent.status_code << "): "
-                      << sent.error << '\n';
-            }
+        if (found == 0) {
+            // Not an error: Ryanair may simply not fly from here, or not
+            // within the requested window.
+            log() << "  " << origin << ": no fares in range\n";
         }
+    }
+
+    // A destination the allowlist does not know is dropped silently otherwise,
+    // so surface it once per sweep rather than never.
+    const std::vector<std::string> unknown = geo::unknown_countries();
+    if (!unknown.empty()) {
+        std::string list;
+        for (const std::string& country : unknown) {
+            if (!list.empty()) list += ", ";
+            list += country;
+        }
+        log() << "  outside region: " << list << '\n';
     }
 
     return stats;
@@ -352,50 +401,49 @@ int run_test_alert(const Config& config) {
     return 1;
 }
 
-// One live call, printed raw, plus what the parser makes of it. The fastest
-// way to find out whether the API actually serves a given German origin before
-// trusting anything built on top of it.
+// One live call, printed raw, plus what the parser makes of it. The endpoint is
+// undocumented, so this is how you find out it has changed shape without
+// waiting for a silent sweep that finds nothing.
 int run_probe(const Config& config) {
-    if (!config.flights.present()) {
-        std::cerr << "--probe needs TRAVELPAYOUTS_TOKEN\n";
-        return 1;
-    }
-
-    const std::string       origin  = config.origins.front();
-    const api::SearchParams params  = params_for(config, origin);
-    const api::Filters      filters = filters_for(config);
+    const std::string       origin = config.origins.front();
+    const api::SearchParams params = params_for(config, origin, 0);
 
     log() << "probing " << config.flights.host << " for origin " << origin << '\n';
-    log() << "  window " << filters.earliest_departure << " to "
-          << filters.latest_departure << ", " << filters.min_nights << '-'
-          << filters.max_nights << " nights\n";
+    log() << "  window " << params.earliest_departure << " to "
+          << params.latest_departure << ", " << params.min_nights << '-'
+          << params.max_nights << " nights\n";
 
     const std::string body = api::fetch_flight_data(config.flights, params);
     if (body.empty()) {
-        std::cerr << "request failed or returned nothing. Check the token, and\n"
-                     "that this origin is a city code the API knows.\n";
+        std::cerr << "request failed or returned nothing.\n"
+                     "Ryanair may not fly from this airport -- try BER, CGN or FMM.\n";
         return 1;
     }
 
     std::cout << "\n--- raw response ---\n" << body << "\n--- end ---\n\n";
 
-    const api::ParseResult parsed = api::parse_flight_offers(body, filters);
+    const api::ParseResult parsed = api::parse_flight_offers(body);
 
-    log() << "parsed " << parsed.offers.size() << " usable offers\n";
-    log() << "  dropped: " << parsed.out_of_region << " outside Europe/Turkey, "
-          << parsed.out_of_window << " outside the date window, "
-          << parsed.wrong_length << " wrong trip length\n";
+    log() << "parsed " << parsed.offers.size() << " usable offers, "
+          << parsed.out_of_region << " outside the region, "
+          << parsed.problems.size() << " malformed"
+          << (parsed.has_more ? ", more pages available" : "") << '\n';
 
     for (const std::string& problem : parsed.problems) {
         log() << "  malformed: " << problem << '\n';
     }
 
     for (const FlightOffer& offer : parsed.offers) {
-        const geo::Place to = geo::lookup(offer.destination);
         log() << "  " << offer.origin << "->" << offer.destination
               << "  " << money(offer.price, offer.currency)
               << "  " << offer.departure_date << " +" << offer.nights() << "n"
-              << "  (" << to.city << ")\n";
+              << "  (" << offer.destination_city << ", "
+              << offer.destination_country << ")\n";
+    }
+
+    const std::vector<std::string> unknown = geo::unknown_countries();
+    for (const std::string& country : unknown) {
+        log() << "  country not in the allowlist: " << country << '\n';
     }
 
     // A response that parses to nothing is the interesting failure, so say what
@@ -422,16 +470,15 @@ int main(int argc, char** argv) {
     if (config.test_alert) return run_test_alert(config);
     if (config.probe)      return run_probe(config);
 
-    const bool live = config.flights.present();
-
     log() << "flight tracker starting\n";
-    log() << "  source   : " << (live ? config.flights.host
-                                      : "built-in mock (no API token)") << '\n';
+    log() << "  source   : " << (config.flights.use_mock
+                                     ? "built-in mock (no network)"
+                                     : config.flights.host) << '\n';
     log() << "  origins  : " << config.origins.size() << " German airports\n";
     log() << "  window   : next " << config.search_days << " days, "
           << config.min_nights << '-' << config.max_nights << " nights\n";
     log() << "  cap      : " << money(config.price_cap, "EUR") << '\n';
-    log() << "  region   : " << geo::size() << " airports in Europe and Turkey\n";
+    log() << "  region   : " << geo::size() << " countries in Europe\n";
     log() << "  database : " << config.database_path << '\n';
     log() << "  mode     : " << (config.dry_run ? "dry run (nothing is sent)" : "live") << '\n';
     log() << "  alerts   : "

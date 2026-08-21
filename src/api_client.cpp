@@ -3,7 +3,6 @@
 #include <cpr/cpr.h>
 #include <nlohmann/json.hpp>
 
-#include <cctype>
 #include <optional>
 #include <string>
 
@@ -14,45 +13,47 @@ namespace {
 
 using nlohmann::json;
 
-constexpr int kSearchTimeoutMs = 20000;
+constexpr int kSearchTimeoutMs = 25000;
 
 // Fetched data is never trusted to have the shape we expect, so every read
 // below goes through one of these helpers rather than operator[] or at().
 
-// value() would throw type_error.302 if the key existed but held null, which
-// is exactly what an API does for a field it has no data for. Check the type.
+const json& child(const json& node, const char* key) {
+    static const json kEmpty = json::object();
+    if (!node.is_object() || !node.contains(key)) return kEmpty;
+    return node.at(key);
+}
+
+// value() would throw type_error.302 if the key existed but held null, which is
+// exactly what this API does for fields it has no data for. Check the type.
 std::string string_or(const json& node, const char* key, const std::string& fallback) {
     if (!node.is_object() || !node.contains(key)) return fallback;
     const json& value = node.at(key);
     return value.is_string() ? value.get<std::string>() : fallback;
 }
 
-// Prices come back as JSON numbers here, but other providers quote them as
-// decimal strings, so accept both and reject anything else.
-std::optional<double> to_price(const json& value) {
+std::optional<double> number_at(const json& node, const char* key) {
+    if (!node.is_object() || !node.contains(key)) return std::nullopt;
+    const json& value = node.at(key);
     if (value.is_number()) return value.get<double>();
 
+    // Some providers quote money as a decimal string, so accept that too.
     if (value.is_string()) {
-        const std::string text = value.get<std::string>();
         try {
-            // stod reads the decimal point per the current C locale, which we
-            // never touch, so it stays "C" and '.' is correct.
-            std::size_t  consumed = 0;
-            const double parsed   = std::stod(text, &consumed);
-            // Reject "142.30 EUR" and friends: a partial parse is a red flag.
+            const std::string text     = value.get<std::string>();
+            std::size_t       consumed = 0;
+            const double      parsed   = std::stod(text, &consumed);
             if (consumed != text.size()) return std::nullopt;
             return parsed;
         } catch (const std::exception&) {
             return std::nullopt;
         }
     }
-
     return std::nullopt;
 }
 
-// departure_at is a full ISO-8601 timestamp ("2026-09-18T10:25:00Z"), but the
-// routes table and every filter work in whole days. Take the date part, and
-// only if it actually looks like one.
+// departureDate is a local timestamp ("2026-09-28T22:00:00"), but the routes
+// table works in whole days. Take the date part, and only if it looks like one.
 std::string date_part(const std::string& timestamp) {
     if (timestamp.size() < 10) return "";
     const std::string date = timestamp.substr(0, 10);
@@ -60,21 +61,42 @@ std::string date_part(const std::string& timestamp) {
     return date;
 }
 
+// Ryanair's booking page accepts the trip as query parameters, so an alert can
+// link straight at the fare rather than making you search for it again.
+std::string booking_url(const FlightOffer& offer) {
+    if (offer.departure_date.empty() || offer.return_date.empty()) return "";
+    return "https://www.ryanair.com/gb/en/trip/flights/select"
+           "?adults=1&teens=0&children=0&infants=0"
+           "&dateOut=" + offer.departure_date +
+           "&dateIn="  + offer.return_date +
+           "&originIata=" + offer.origin +
+           "&destinationIata=" + offer.destination +
+           "&isReturn=true";
+}
+
 }  // namespace
 
-std::string fetch_flight_data(const Credentials& creds, const SearchParams& params) {
-    if (!creds.present()) return "";
+std::string fetch_flight_data(const Settings& settings, const SearchParams& params) {
+    if (settings.use_mock) return mock_flight_data();
 
-    // city-directions returns the cheapest cached fare to every destination
-    // reachable from this origin, in one call. That is what makes "anywhere in
-    // Europe" affordable: eight origins is eight requests, not hundreds.
     const cpr::Response response = cpr::Get(
-        cpr::Url{"https://" + creds.host + "/v1/city-directions"},
-        cpr::Parameters{{"origin", params.origin},
-                        {"currency", params.currency},
-                        {"token", creds.token}},
-        // The response is sizeable JSON and the docs ask for compression.
-        cpr::Header{{"Accept-Encoding", "gzip, deflate"}},
+        cpr::Url{"https://" + settings.host + "/farfnd/v4/roundTripFares"},
+        cpr::Parameters{
+            {"departureAirportIataCode", params.origin},
+            {"outboundDepartureDateFrom", params.earliest_departure},
+            {"outboundDepartureDateTo",   params.latest_departure},
+            {"inboundDepartureDateFrom",  params.earliest_departure},
+            {"inboundDepartureDateTo",    params.latest_departure},
+            {"durationFrom", std::to_string(params.min_nights)},
+            {"durationTo",   std::to_string(params.max_nights)},
+            {"currency", params.currency},
+            {"limit",  std::to_string(kPageSize)},
+            {"offset", std::to_string(params.offset)},
+        },
+        // A default libcurl user agent gets an empty result set back.
+        cpr::Header{{"User-Agent", "Mozilla/5.0"},
+                    {"Accept", "application/json"},
+                    {"Accept-Encoding", "gzip, deflate"}},
         cpr::Timeout{kSearchTimeoutMs});
 
     if (response.error || response.status_code != 200) return "";
@@ -82,56 +104,61 @@ std::string fetch_flight_data(const Credentials& creds, const SearchParams& para
 }
 
 std::string mock_flight_data() {
-    // Shaped like a real city-directions response: `data` is an object keyed by
-    // destination IATA, not an array.
+    // Shaped exactly like a roundTripFares page. Dates are relative to today
+    // rather than hardcoded: fixed dates would drift out of the search window
+    // as time passed, and the mock would silently stop matching, taking the
+    // tests with it.
     //
-    // Dates are relative to today rather than hardcoded. A fixed date would
-    // drift out of the search window as time passed, and the mock would
-    // silently start failing every filter -- taking the tests with it.
-    const std::string dep_30 = date_offset_utc(30);
-    const std::string ret_33 = date_offset_utc(33);
-    const std::string dep_45 = date_offset_utc(45);
-    const std::string ret_48 = date_offset_utc(48);
-    const std::string dep_60 = date_offset_utc(60);
-    const std::string ret_74 = date_offset_utc(74);   // 14 nights: too long
-    const std::string dep_far = date_offset_utc(300); // outside the window
+    // Entries: two usable (Malaga cheap, Athens above the cap), one outside the
+    // region, one with no price, and one with no arrival airport.
+    const std::string out1 = date_offset_utc(30), in1 = date_offset_utc(33);
+    const std::string out2 = date_offset_utc(45), in2 = date_offset_utc(48);
 
-    // Entries, in order: a good one, a cheaper good one, one outside the
-    // region, one whose trip is too long, one departing too far out, one with
-    // an unparseable price, and one missing its destination.
-    return std::string(R"JSON({
-  "success": true,
-  "data": {
-    "IST": {"origin":"FRA","destination":"IST","price":142.3,"transfers":0,
-            "airline":"TK","flight_number":"1596",
-            "departure_at":")JSON") + dep_30 + R"JSON(T10:25:00Z","return_at":")JSON" + ret_33 + R"JSON(T14:05:00Z",
-            "expires_at":")JSON" + date_offset_utc(3) + R"JSON(T10:00:00Z"},
-    "LIS": {"origin":"FRA","destination":"LIS","price":88.99,"transfers":1,
-            "airline":"TP","flight_number":"577",
-            "departure_at":")JSON" + dep_45 + R"JSON(T06:00:00Z","return_at":")JSON" + ret_48 + R"JSON(T20:30:00Z",
-            "expires_at":")JSON" + date_offset_utc(3) + R"JSON(T10:00:00Z"},
-    "JFK": {"origin":"FRA","destination":"JFK","price":310.0,"transfers":0,
-            "airline":"LH","flight_number":"400",
-            "departure_at":")JSON" + dep_30 + R"JSON(T09:00:00Z","return_at":")JSON" + ret_33 + R"JSON(T18:00:00Z"},
-    "AYT": {"origin":"FRA","destination":"AYT","price":95.0,"transfers":0,
-            "airline":"XQ","flight_number":"981",
-            "departure_at":")JSON" + dep_60 + R"JSON(T05:40:00Z","return_at":")JSON" + ret_74 + R"JSON(T22:10:00Z"},
-    "ATH": {"origin":"FRA","destination":"ATH","price":77.0,"transfers":0,
-            "airline":"A3","flight_number":"821",
-            "departure_at":")JSON" + dep_far + R"JSON(T07:15:00Z","return_at":")JSON" + date_offset_utc(303) + R"JSON(T19:00:00Z"},
-    "BCN": {"origin":"FRA","destination":"BCN","price":"n/a","transfers":0,
-            "airline":"VY","flight_number":"1823",
-            "departure_at":")JSON" + dep_30 + R"JSON(T11:00:00Z","return_at":")JSON" + ret_33 + R"JSON(T21:00:00Z"},
-    "XXX": {"origin":"FRA","price":75.0,"transfers":0,
-            "airline":"??","flight_number":"1",
-            "departure_at":")JSON" + dep_30 + R"JSON(T11:00:00Z","return_at":")JSON" + ret_33 + R"JSON(T21:00:00Z"}
-  },
-  "currency": "eur",
-  "error": null
-})JSON";
+    auto airport = [](const std::string& country, const std::string& iata,
+                      const std::string& name) {
+        return R"({"countryName":")" + country + R"(","iataCode":")" + iata +
+               R"(","name":")" + name + R"(","city":{"name":")" + name + R"("}})";
+    };
+
+    const std::string cgn = airport("Germany", "CGN", "Cologne");
+    const std::string agp = airport("Spain", "AGP", "Malaga");
+    const std::string ath = airport("Greece", "ATH", "Athens");
+    const std::string aga = airport("Morocco", "AGA", "Agadir");
+    const std::string blq = airport("Italy", "BLQ", "Bologna");
+
+    auto leg = [](const std::string& from, const std::string& to,
+                  const std::string& date, const std::string& flight) {
+        return R"({"departureAirport":)" + from + R"(,"arrivalAirport":)" + to +
+               R"(,"departureDate":")" + date + R"(","flightNumber":")" + flight + R"("})";
+    };
+
+    return std::string(R"({"arrivalAirportCategories":null,"fares":[)") +
+
+        R"({"outbound":)" + leg(cgn, agp, out1 + "T22:00:00", "FR2308") +
+        R"(,"inbound":)"  + leg(agp, cgn, in1 + "T21:20:00", "FR2307") +
+        R"(,"summary":{"price":{"value":88.99,"currencyCode":"EUR"},"tripDurationDays":3}},)" +
+
+        R"({"outbound":)" + leg(cgn, ath, out2 + "T06:00:00", "FR8801") +
+        R"(,"inbound":)"  + leg(ath, cgn, in2 + "T19:30:00", "FR8802") +
+        R"(,"summary":{"price":{"value":142.30,"currencyCode":"EUR"},"tripDurationDays":3}},)" +
+
+        R"({"outbound":)" + leg(cgn, aga, out1 + "T09:00:00", "FR1234") +
+        R"(,"inbound":)"  + leg(aga, cgn, in1 + "T18:00:00", "FR1235") +
+        R"(,"summary":{"price":{"value":95.00,"currencyCode":"EUR"},"tripDurationDays":3}},)" +
+
+        R"({"outbound":)" + leg(cgn, blq, out1 + "T11:00:00", "FR555") +
+        R"(,"inbound":)"  + leg(blq, cgn, in1 + "T21:00:00", "FR556") +
+        R"(,"summary":{"tripDurationDays":3}},)" +
+
+        R"({"outbound":{"departureAirport":)" + cgn +
+        R"(,"departureDate":")" + out1 + R"(T11:00:00","flightNumber":"FR777"})" +
+        R"(,"inbound":{"departureDate":")" + in1 + R"(T21:00:00"})" +
+        R"(,"summary":{"price":{"value":75.00,"currencyCode":"EUR"},"tripDurationDays":3}})" +
+
+        R"(],"nextPage":null,"size":5})";
 }
 
-ParseResult parse_flight_offers(const std::string& payload, const Filters& filters) {
+ParseResult parse_flight_offers(const std::string& payload) {
     ParseResult result;
 
     if (payload.empty()) {
@@ -152,97 +179,91 @@ ParseResult parse_flight_offers(const std::string& payload, const Filters& filte
         return result;
     }
 
-    // The API reports its own failures in the body with a 200 status, so a
-    // successful HTTP request is not the same as a successful query.
-    if (root.contains("error") && root.at("error").is_string() &&
-        !root.at("error").get<std::string>().empty()) {
-        result.problems.emplace_back("API error: " + root.at("error").get<std::string>());
+    // The endpoint reports its own rejections in the body: an out-of-range
+    // limit comes back as {"code":"InvalidLimit"} with a 200 status, so a
+    // successful request is not the same as a successful query.
+    if (root.contains("code") && root.at("code").is_string()) {
+        result.problems.emplace_back("API rejected the request: " +
+                                     root.at("code").get<std::string>());
         return result;
     }
 
-    if (!root.contains("data") || !root.at("data").is_object()) {
-        result.problems.emplace_back("response has no 'data' object");
+    if (!root.contains("fares") || !root.at("fares").is_array()) {
+        result.problems.emplace_back("response has no 'fares' array");
         return result;
     }
 
-    // The API echoes the currency lowercase ("eur"); ISO-4217 is uppercase and
-    // that is what ends up in alerts.
-    std::string currency = string_or(root, "currency", "EUR");
-    for (char& c : currency) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    // nextPage holds a page number, or null on the last page.
+    result.has_more = root.contains("nextPage") && !root.at("nextPage").is_null();
 
-    // `data` is keyed by destination IATA, so iterate items rather than values:
-    // the key is the authoritative destination even if the nested object omits
-    // it.
-    for (const auto& item : root.at("data").items()) {
-        const std::string& key   = item.key();
-        const json&        entry = item.value();
+    std::size_t index = 0;
+    for (const json& fare : root.at("fares")) {
+        const std::string label = "fare[" + std::to_string(index++) + "]";
 
-        if (!entry.is_object()) {
-            result.problems.emplace_back(key + ": not an object");
+        if (!fare.is_object()) {
+            result.problems.emplace_back(label + ": not an object");
             continue;
         }
+
+        const json& outbound = child(fare, "outbound");
+        const json& inbound  = child(fare, "inbound");
+        const json& from     = child(outbound, "departureAirport");
+        const json& to       = child(outbound, "arrivalAirport");
 
         FlightOffer offer;
-        offer.origin      = string_or(entry, "origin", "");
-        offer.destination = string_or(entry, "destination", key);
-        offer.currency    = currency;
+        offer.origin              = string_or(from, "iataCode", "");
+        offer.destination         = string_or(to, "iataCode", "");
+        offer.origin_city         = string_or(child(from, "city"), "name",
+                                              string_or(from, "name", offer.origin));
+        offer.destination_city    = string_or(child(to, "city"), "name",
+                                              string_or(to, "name", offer.destination));
+        offer.destination_country = string_or(to, "countryName", "");
 
+        // Origin and destination form the primary key of the routes table, so
+        // an entry missing either cannot be stored at all.
         if (offer.origin.empty() || offer.destination.empty()) {
-            result.problems.emplace_back(key + ": missing origin or destination");
+            result.problems.emplace_back(label + ": missing origin or destination");
             continue;
         }
 
-        // Anywhere outside Europe or Turkey is not an error, just not ours.
-        if (!geo::in_region(offer.destination)) {
+        // Outside the tracked region is not an error, just not ours. Record the
+        // country so a gap in the allowlist surfaces instead of hiding.
+        if (!geo::in_region(offer.destination_country)) {
+            geo::note_unknown(offer.destination_country);
             ++result.out_of_region;
             continue;
         }
 
-        offer.departure_date = date_part(string_or(entry, "departure_at", ""));
-        offer.return_date    = date_part(string_or(entry, "return_at", ""));
+        offer.departure_date = date_part(string_or(outbound, "departureDate", ""));
+        offer.return_date    = date_part(string_or(inbound, "departureDate", ""));
 
         if (offer.departure_date.empty()) {
-            result.problems.emplace_back(key + ": no usable departure date");
+            result.problems.emplace_back(label + " " + offer.destination +
+                                         ": no usable departure date");
             continue;
         }
 
-        // ISO dates compare correctly as strings, which is the whole point of
-        // the format.
-        if ((!filters.earliest_departure.empty() &&
-             offer.departure_date < filters.earliest_departure) ||
-            (!filters.latest_departure.empty() &&
-             offer.departure_date > filters.latest_departure)) {
-            ++result.out_of_window;
-            continue;
-        }
+        // The trip price is the summary total, not either leg's own fare.
+        const json&                 summary = child(fare, "summary");
+        const json&                 price   = child(summary, "price");
+        const std::optional<double> amount  = number_at(price, "value");
 
-        if (filters.min_nights > 0 || filters.max_nights > 0) {
-            const int nights = offer.nights();
-            if ((filters.min_nights > 0 && nights < filters.min_nights) ||
-                (filters.max_nights > 0 && nights > filters.max_nights)) {
-                ++result.wrong_length;
-                continue;
-            }
-        }
-
-        if (!entry.contains("price")) {
-            result.problems.emplace_back(key + ": no price");
-            continue;
-        }
-
-        const std::optional<double> amount = to_price(entry.at("price"));
         if (!amount.has_value()) {
-            result.problems.emplace_back(key + ": price is not a number");
+            result.problems.emplace_back(label + " " + offer.destination + ": no price");
             continue;
         }
 
         // A zero or negative fare is a data bug, not a bargain worth alerting on.
         if (*amount <= 0.0) {
-            result.problems.emplace_back(key + ": non-positive price");
+            result.problems.emplace_back(label + " " + offer.destination +
+                                         ": non-positive price");
             continue;
         }
 
-        offer.price = *amount;
+        offer.price        = *amount;
+        offer.currency     = string_or(price, "currencyCode", "EUR");
+        offer.booking_link = booking_url(offer);
+
         result.offers.push_back(std::move(offer));
     }
 
