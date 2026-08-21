@@ -45,12 +45,44 @@ jobs:
           restore-keys: deps-${{ matrix.name }}-
 
       - name: Configure
-        run: >
-          cmake -S . -B build ${{ matrix.configure }}
-          -DFETCHCONTENT_BASE_DIR=${{ github.workspace }}/.deps
+        shell: bash
+        run: |
+          # github.workspace is a backslash path on Windows; cygpath turns it
+          # into the D:/... form CMake wants. Plain $PWD would be an MSYS path
+          # that CMake cannot resolve.
+          if command -v cygpath >/dev/null 2>&1; then
+            deps="$(cygpath -m "$PWD")/.deps"
+          else
+            deps="$PWD/.deps"
+          fi
+          echo "FETCHCONTENT_BASE_DIR=$deps"
+
+          set +e
+          cmake -S . -B build ${{ matrix.configure }} \
+                -DFETCHCONTENT_BASE_DIR="$deps" 2>&1 | tee configure.log
+          status=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$status" -ne 0 ]; then
+            # Job logs need repo admin rights to download, but annotations are
+            # readable by anyone, so put the actual reason where it can be seen.
+            grep -iE "error|Could NOT find|does not (exist|match)" configure.log \
+              | tail -8 | while IFS= read -r line; do echo "::error::$line"; done
+            exit "$status"
+          fi
 
       - name: Build
-        run: cmake --build build ${{ matrix.build }}
+        shell: bash
+        run: |
+          set +e
+          cmake --build build ${{ matrix.build }} 2>&1 | tee compile.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            grep -iE "error" compile.log | tail -8 \
+              | while IFS= read -r line; do echo "::error::$line"; done
+            exit "$status"
+          fi
 
       # A binary that links is not the same as a binary that runs. --dry-run
       # keeps this offline and posts nothing: no webhook, no API, no network.
