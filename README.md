@@ -60,6 +60,7 @@ flight_tracker --probe
 | `--once`          | run a single sweep and exit                     |
 | `--dry-run`       | print alerts instead of posting them            |
 | `--probe`         | one live API call, dumped raw                   |
+| `--test-alert`    | send one sample alert to Telegram and exit      |
 | `--cap=EUR`       | only alert below this price (default 100)       |
 | `--origins=A,B,C` | override the German airports to sweep           |
 | `--interval=N`    | seconds between sweeps (default 21600, min 10)  |
@@ -161,6 +162,16 @@ Add three repository secrets (Settings -> Secrets and variables -> Actions):
 | `TELEGRAM_CHAT_ID`   | `@your_channel`, or a numeric id for a private chat |
 | `AMADEUS_CLIENT_ID`  | developers.amadeus.com, free Self-Service app       |
 | `AMADEUS_SECRET`     | same app                                            |
+
+Confirm the Telegram side works before waiting on a real price drop:
+
+```
+TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=@your_channel ./flight_tracker --test-alert
+```
+
+It sends one sample alert and explains the common failures: 401 is a bad token,
+400 is usually a chat id missing its `@` prefix, 403 means the bot may not post
+in that channel.
 
 To alert a channel: create it in Telegram, add your bot as an **administrator**
 with permission to post, and use `@channelname` as the chat id. For a private

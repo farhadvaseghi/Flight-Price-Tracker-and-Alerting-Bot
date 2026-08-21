@@ -50,6 +50,7 @@ struct Config {
     bool        dry_run          = false;
     bool        run_once         = false;
     bool        probe            = false;              // one live call, dump it
+    bool        test_alert       = false;              // send one fake alert
 };
 
 std::string env_or(const char* name, const std::string& fallback) {
@@ -118,6 +119,7 @@ Config load_config(int argc, char** argv) {
         if (arg == "--once")         config.run_once = true;
         else if (arg == "--dry-run") config.dry_run  = true;
         else if (arg == "--probe")   config.probe    = true;
+        else if (arg == "--test-alert") config.test_alert = true;
         else if (arg.rfind("--cap=", 0) == 0) {
             try { config.price_cap = std::stod(arg.substr(6)); }
             catch (const std::exception&) { std::cerr << "warning: bad --cap\n"; }
@@ -310,6 +312,54 @@ void interruptible_sleep(int seconds) {
     }
 }
 
+// Sends one fabricated alert, so the Telegram side can be confirmed working
+// without waiting for a real price drop. Exercises the whole delivery path:
+// token, chat id, the bot's permission to post, and HTML rendering.
+int run_test_alert(const Config& config) {
+    if (!config.alerts.configured()) {
+        std::cerr << "--test-alert needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID\n";
+        return 1;
+    }
+
+    FlightOffer offer;
+    offer.origin         = "FRA";
+    offer.destination    = "IST";
+    offer.departure_date = date_offset(30);
+    offer.return_date    = date_offset(33);
+    offer.currency       = "EUR";
+    offer.price          = 89.0;
+
+    db::PriceUpdate update;
+    update.previous_lowest = 164.5;
+    update.current_price   = offer.price;
+    update.new_low         = true;
+
+    log() << "sending a sample alert to " << config.alerts.chat_id << '\n';
+    std::cout << '\n' << notify::build_price_drop_message(offer, update) << "\n\n";
+
+    const notify::SendResult sent =
+        notify::send_price_drop_alert(config.alerts, offer, update);
+
+    if (sent.ok) {
+        log() << "delivered. Check the channel -- setup is working.\n";
+        return 0;
+    }
+
+    log() << "delivery FAILED (" << sent.status_code << "): " << sent.error << '\n';
+
+    // Name the three common failures, because the API's own wording is opaque.
+    if (sent.status_code == 401) {
+        log() << "  401: the bot token is wrong or has been revoked.\n";
+    } else if (sent.status_code == 400) {
+        log() << "  400: usually a wrong chat id. A channel needs the @ prefix,\n";
+        log() << "       e.g. @my_channel, and must already exist.\n";
+    } else if (sent.status_code == 403) {
+        log() << "  403: the bot may not post there. Add it to the channel as an\n";
+        log() << "       administrator with permission to post messages.\n";
+    }
+    return 1;
+}
+
 // One live call, printed raw. The fastest way to find out whether Amadeus'
 // free test tier actually serves Flight Inspiration Search for a given origin,
 // before trusting anything built on top of it.
@@ -367,7 +417,8 @@ int main(int argc, char** argv) {
 
     const Config config = load_config(argc, argv);
 
-    if (config.probe) return run_probe(config);
+    if (config.test_alert) return run_test_alert(config);
+    if (config.probe)      return run_probe(config);
 
     const bool live = config.amadeus.present();
 
