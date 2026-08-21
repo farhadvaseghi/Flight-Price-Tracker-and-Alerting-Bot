@@ -20,7 +20,12 @@ jobs:
         include:
           - name: windows-msvc
             os: windows-latest
-            configure: -G "Visual Studio 17 2022" -A x64
+            # No -G here on purpose. Pinning "Visual Studio 17 2022" breaks the
+            # moment GitHub moves windows-latest to an image with a newer
+            # Visual Studio, which is exactly how this job first failed:
+            # "could not find any instance of Visual Studio". Letting CMake
+            # pick the installed generator survives those image bumps.
+            configure: -DCMAKE_BUILD_TYPE=Release
             build: --config Release
             binary: build/bin/flight_tracker.exe
           - name: ubuntu-gcc
@@ -70,6 +75,10 @@ jobs:
               | tail -8 | while IFS= read -r line; do echo "::error::$line"; done
             exit "$status"
           fi
+
+          # Record what CMake actually chose, so a future image bump is
+          # obvious in the log rather than a mystery.
+          grep -E "^CMAKE_(GENERATOR|CXX_COMPILER):" build/CMakeCache.txt || true
 
       - name: Build
         shell: bash
