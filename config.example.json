@@ -1,0 +1,6 @@
+{
+  "webhook_url": "https://discord.com/api/webhooks/REPLACE/WITH-YOUR-TOKEN",
+  "database_path": "flights.db",
+  "interval_seconds": 900,
+  "alert_on_new_route": false
+}
