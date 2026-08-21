@@ -1,81 +1,76 @@
-// Step 3 harness: parses the mock API response and feeds it into the store.
+// Step 4 harness: exercises the Discord webhook layer.
 // This file gets replaced by the real application loop in Step 5.
 
-#include <cstdio>
-#include <iomanip>
+#include <chrono>
 #include <iostream>
 
-#include "api_client.h"
 #include "database.h"
 #include "flight.h"
+#include "notifier.h"
+
+namespace {
+
+void show(const char* label, const notify::SendResult& result) {
+    std::cout << "  " << label << "\n"
+              << "      ok     : " << (result.ok ? "yes" : "no") << '\n'
+              << "      status : " << result.status_code << '\n'
+              << "      error  : " << (result.error.empty() ? "-" : result.error) << '\n';
+}
+
+}  // namespace
 
 int main() {
-    const char* kPath = "step3_test.db";
-    std::remove(kPath);
+    FlightOffer offer;
+    offer.origin         = "FRA";
+    offer.destination    = "TBS";
+    offer.departure_date = "2026-11-14";
+    offer.airline        = "Turkish Airlines";
+    offer.currency       = "EUR";
+    offer.price          = 355.00;
 
-    std::cout << std::fixed << std::setprecision(2);
+    db::PriceUpdate update;
+    update.previous_lowest = 412.50;
+    update.current_price   = 355.00;
+    update.new_low         = true;
 
-    try {
-        db::Database store(kPath);
-        store.initialize();
+    // --- payload construction, no network involved ---
+    std::cout << "alert payload:\n"
+              << notify::build_price_drop_payload(offer, update) << "\n\n";
 
-        // --- pass 1: cold database, everything is a first sighting ---
-        const std::string    payload = api::fetch_flight_data();
-        const api::ParseResult parsed = api::parse_flight_offers(payload);
+    // A name containing a quote must not be able to break the JSON.
+    FlightOffer hostile = offer;
+    hostile.airline = "Air \"Quote\" \n Injection";
+    std::cout << "payload with hostile airline name:\n"
+              << notify::build_price_drop_payload(hostile, update) << "\n\n";
 
-        std::cout << "parsed " << parsed.offers.size() << " usable offers, "
-                  << parsed.problems.size() << " rejected\n\n";
+    // --- transport behaviour, against a public HTTP status echo service ---
+    std::cout << "transport:\n";
 
-        std::cout << "rejected entries:\n";
-        for (const std::string& problem : parsed.problems) {
-            std::cout << "  - " << problem << '\n';
-        }
-        std::cout << '\n';
+    show("empty URL (no request made)",
+         notify::send_discord_webhook("", "hello"));
 
-        std::cout << "pass 1 (cold database):\n";
-        for (const FlightOffer& offer : parsed.offers) {
-            const db::PriceUpdate update = store.record_price(offer);
-            std::cout << "  " << offer.origin << "->" << offer.destination
-                      << ' ' << offer.departure_date
-                      << "  " << offer.price << ' ' << offer.currency
-                      << "  [" << offer.airline << "]"
-                      << (update.first_sighting ? "  (new route)" : "")
-                      << (update.new_low ? "  (NEW LOW)" : "") << '\n';
-        }
+    // Discord answers 204 on success; this proves we accept it and that TLS
+    // works through Schannel.
+    show("204 No Content (Discord's success code)",
+         notify::send_discord_webhook("http://127.0.0.1:8099/status/204", "ping"));
 
-        // --- pass 2: same data again, so nothing should look like a drop ---
-        std::cout << "\npass 2 (identical data replayed):\n";
-        for (const FlightOffer& offer : parsed.offers) {
-            const db::PriceUpdate update = store.record_price(offer);
-            std::cout << "  " << offer.origin << "->" << offer.destination
-                      << "  first_sighting=" << (update.first_sighting ? "y" : "n")
-                      << "  new_low=" << (update.new_low ? "y" : "n") << '\n';
-        }
+    show("404 (dead webhook - must not retry)",
+         notify::send_discord_webhook("http://127.0.0.1:8099/status/404", "ping"));
 
-        // --- pass 3: one genuine drop ---
-        std::cout << "\npass 3 (FRA->TBS 2026-11-14 drops to 355.00):\n";
-        FlightOffer cheaper = parsed.offers.front();
-        cheaper.price = 355.00;
-        const db::PriceUpdate update = store.record_price(cheaper);
-        std::cout << "  previous low " << update.previous_lowest
-                  << " -> " << update.current_price
-                  << "  new_low=" << (update.new_low ? "YES" : "no") << '\n';
+    const auto rl_started = std::chrono::steady_clock::now();
+    show("429 twice then 204 (rate limit recovery)",
+         notify::send_discord_webhook("http://127.0.0.1:8099/status/429", "ping"));
+    std::cout << "      elapsed: "
+              << std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now() - rl_started).count()
+              << "ms (two Retry-After waits of 400ms)\n";
 
-        // --- malformed input must not throw ---
-        std::cout << "\nrobustness:\n";
-        for (const char* bad : {"", "<html>502 Bad Gateway</html>", "{\"offers\": 42}",
-                                "{\"offers\": [null, 7]}"}) {
-            const api::ParseResult r = api::parse_flight_offers(bad);
-            std::cout << "  " << std::setw(30) << std::left
-                      << (std::string(bad).empty() ? "(empty body)" : bad)
-                      << " -> " << r.offers.size() << " offers, "
-                      << r.problems.size() << " problems\n";
-        }
-
-    } catch (const db::Error& e) {
-        std::cerr << "database error: " << e.what() << '\n';
-        return 1;
-    }
+    const auto started = std::chrono::steady_clock::now();
+    show("500 (server error - must retry with backoff)",
+         notify::send_discord_webhook("http://127.0.0.1:8099/status/500", "ping"));
+    const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - started);
+    std::cout << "      elapsed: " << elapsed.count() << "s (backoff proves retries ran)\n";
 
     return 0;
 }

@@ -86,6 +86,7 @@ add_executable(flight_tracker
     src/main.cpp
     src/database.cpp
     src/api_client.cpp
+    src/notifier.cpp
 )
 
 target_link_libraries(flight_tracker PRIVATE

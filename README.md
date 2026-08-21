@@ -34,5 +34,5 @@ amalgamation, so it takes a few minutes. Later configures are cached.
 - [x] Step 1 — build system
 - [x] Step 2 — SQLite persistence layer
 - [x] Step 3 — JSON parsing of the (mocked) API response
-- [ ] Step 4 — Discord webhook alerting
+- [x] Step 4 — Discord webhook alerting
 - [ ] Step 5 — main polling loop
