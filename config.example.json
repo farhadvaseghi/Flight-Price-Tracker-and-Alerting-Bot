@@ -1,5 +1,7 @@
 {
-  "_comment": "Copy to config.json and edit. Secrets belong in the environment, not here: DISCORD_WEBHOOK_URL, AMADEUS_CLIENT_ID, AMADEUS_SECRET.",
+  "_comment": "Copy to config.json and edit. The bot token is a secret and is read from TELEGRAM_BOT_TOKEN only - never put it here.",
+
+  "telegram_chat_id": "@your_channel_name",
 
   "origins": ["FRA", "MUC", "BER", "DUS", "HAM", "CGN", "STR", "HAJ"],
 

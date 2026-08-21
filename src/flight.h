@@ -6,7 +6,7 @@
 //
 // This is the unit of currency between the layers: api_client builds these out
 // of JSON, database stores them, notifier turns the interesting ones into
-// Discord messages.
+// Telegram messages.
 //
 // Amadeus' Flight Inspiration Search returns a matched outbound/return pair as
 // a single priced offer, so departure_date and return_date belong to the same

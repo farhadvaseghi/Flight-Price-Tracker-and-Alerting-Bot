@@ -45,9 +45,10 @@ jobs:
 
       - name: Check prices
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          AMADEUS_CLIENT_ID:   ${{ secrets.AMADEUS_CLIENT_ID }}
-          AMADEUS_SECRET:      ${{ secrets.AMADEUS_SECRET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          AMADEUS_CLIENT_ID:  ${{ secrets.AMADEUS_CLIENT_ID }}
+          AMADEUS_SECRET:     ${{ secrets.AMADEUS_SECRET }}
         run: |
           # Without credentials the tracker falls back to its mock payload,
           # which would write nonsense into the real price history. Better to

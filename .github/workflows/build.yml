@@ -94,7 +94,7 @@ jobs:
           fi
 
       # A binary that links is not the same as a binary that runs. --dry-run
-      # keeps this offline and posts nothing: no webhook, no API, no network.
+      # keeps this offline and posts nothing: no Telegram, no API, no network.
       - name: Smoke test
         shell: bash
         run: |

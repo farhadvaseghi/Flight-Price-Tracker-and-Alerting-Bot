@@ -1,6 +1,6 @@
 // Flight Price Tracker - sweeps German airports for cheap return trips to
 // Europe and Turkey, keeps the lowest price ever seen per city pair in SQLite,
-// and alerts a Discord channel when a new low lands under the price cap.
+// and alerts a Telegram channel when a new low lands under the price cap.
 
 #include <atomic>
 #include <chrono>
@@ -38,7 +38,7 @@ extern "C" void handle_signal(int) {
 // ---------------------------------------------------------------------------
 
 struct Config {
-    std::string              webhook_url;              // secret
+    notify::Telegram         alerts;                   // bot token is secret
     api::Credentials         amadeus;                  // secret
     std::string              database_path = "flights.db";
     std::vector<std::string> origins;                  // German airports
@@ -80,8 +80,9 @@ Config load_config(int argc, char** argv) {
         if (doc.is_discarded()) {
             std::cerr << "warning: config.json is not valid JSON, ignoring it\n";
         } else {
-            if (doc.contains("webhook_url") && doc["webhook_url"].is_string())
-                config.webhook_url = doc["webhook_url"].get<std::string>();
+            // The chat id is not a secret; the bot token is, so it is env only.
+            if (doc.contains("telegram_chat_id") && doc["telegram_chat_id"].is_string())
+                config.alerts.chat_id = doc["telegram_chat_id"].get<std::string>();
             if (doc.contains("database_path") && doc["database_path"].is_string())
                 config.database_path = doc["database_path"].get<std::string>();
             if (doc.contains("price_cap") && doc["price_cap"].is_number())
@@ -104,7 +105,9 @@ Config load_config(int argc, char** argv) {
         }
     }
 
-    config.webhook_url           = env_or("DISCORD_WEBHOOK_URL", config.webhook_url);
+    config.alerts.bot_token      = env_or("TELEGRAM_BOT_TOKEN", config.alerts.bot_token);
+    config.alerts.chat_id        = env_or("TELEGRAM_CHAT_ID", config.alerts.chat_id);
+    config.alerts.api_base       = env_or("TELEGRAM_API_BASE", config.alerts.api_base);
     config.database_path         = env_or("FLIGHT_TRACKER_DB", config.database_path);
     config.amadeus.client_id     = env_or("AMADEUS_CLIENT_ID", config.amadeus.client_id);
     config.amadeus.client_secret = env_or("AMADEUS_SECRET", config.amadeus.client_secret);
@@ -139,7 +142,8 @@ Config load_config(int argc, char** argv) {
                 "  --origins=A,B,C    override the German airports to sweep\n"
                 "  --interval=N       seconds between sweeps (default 21600)\n\n"
                 "environment:\n"
-                "  DISCORD_WEBHOOK_URL   webhook to post alerts to\n"
+                "  TELEGRAM_BOT_TOKEN    bot token from @BotFather\n"
+                "  TELEGRAM_CHAT_ID      channel (@name) or numeric chat id\n"
                 "  AMADEUS_CLIENT_ID     Amadeus Self-Service key\n"
                 "  AMADEUS_SECRET        Amadeus Self-Service secret\n"
                 "  FLIGHT_TRACKER_DB     database file (default flights.db)\n\n"
@@ -279,7 +283,7 @@ CycleStats run_cycle(const Config& config, db::Database& store) {
             }
 
             const notify::SendResult sent =
-                notify::send_price_drop_alert(config.webhook_url, offer, update);
+                notify::send_price_drop_alert(config.alerts, offer, update);
 
             if (sent.ok) {
                 ++stats.alerts;
@@ -376,10 +380,13 @@ int main(int argc, char** argv) {
     log() << "  cap      : " << money(config.price_cap, "EUR") << '\n';
     log() << "  region   : " << geo::size() << " airports in Europe and Turkey\n";
     log() << "  database : " << config.database_path << '\n';
-    log() << "  mode     : " << (config.dry_run ? "dry run (no webhook posts)" : "live") << '\n';
+    log() << "  mode     : " << (config.dry_run ? "dry run (nothing is sent)" : "live") << '\n';
+    log() << "  alerts   : "
+          << (config.alerts.configured() ? "Telegram chat " + config.alerts.chat_id
+                                         : "not configured") << '\n';
 
-    if (config.webhook_url.empty() && !config.dry_run) {
-        log() << "  warning  : no DISCORD_WEBHOOK_URL set; alerts will fail\n";
+    if (!config.alerts.configured() && !config.dry_run) {
+        log() << "  warning  : no TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID; alerts will fail\n";
     }
 
     try {

@@ -3,8 +3,8 @@
 [![build](https://github.com/farhadvaseghi/Flight-Price-Tracker-and-Alerting-Bot/actions/workflows/build.yml/badge.svg)](https://github.com/farhadvaseghi/Flight-Price-Tracker-and-Alerting-Bot/actions/workflows/build.yml)
 
 Sweeps German airports for cheap return trips to Europe and Turkey, remembers the
-lowest price ever seen for each city pair in SQLite, and pings a Discord channel
-when a new low lands under your price cap.
+lowest price ever seen for each city pair in SQLite, and pings a Telegram
+channel when a new low lands under your price cap.
 
 Data comes from Amadeus' **Flight Inspiration Search**, which returns every
 destination reachable from one origin in a single call -- so a sweep of eight
@@ -67,16 +67,22 @@ flight_tracker --probe
 Configuration is layered, later sources winning:
 **defaults → `config.json` → environment → CLI flags.**
 
-| Setting     | `config.json`        | Environment             |
-|-------------|----------------------|-------------------------|
-| Webhook URL | `webhook_url`        | `DISCORD_WEBHOOK_URL`   |
-| Database    | `database_path`      | `FLIGHT_TRACKER_DB`     |
-| Interval    | `interval_seconds`   | —                       |
-| New routes  | `alert_on_new_route` | —                       |
+| Setting        | `config.json`               | Environment            |
+|----------------|-----------------------------|------------------------|
+| Bot token      | — (secret, env only)         | `TELEGRAM_BOT_TOKEN`   |
+| Chat id        | `telegram_chat_id`          | `TELEGRAM_CHAT_ID`     |
+| Amadeus key    | — (secret, env only)         | `AMADEUS_CLIENT_ID`    |
+| Amadeus secret | — (secret, env only)         | `AMADEUS_SECRET`       |
+| Database       | `database_path`             | `FLIGHT_TRACKER_DB`    |
+| Origins        | `origins`                   | —                      |
+| Price cap      | `price_cap`                 | —                      |
+| Date window    | `search_days`               | —                      |
+| Trip length    | `min_nights` / `max_nights` | —                      |
+| Interval       | `interval_seconds`          | —                      |
 
 Copy `config.example.json` to `config.json` to get started. **`config.json` is
-gitignored** — the webhook URL is a credential, and anyone holding it can post
-to your channel.
+gitignored.** The three secrets are deliberately environment-only and cannot be
+set in the file at all: anyone holding the bot token can post as your bot.
 
 ## Architecture
 
@@ -89,7 +95,7 @@ geo::in_region()         geo.cpp          bundled airport table, no API calls
         |
 record_price()           database.cpp     one transaction: new low for this city pair?
         |
-send_price_drop_alert()  notifier.cpp     cpr::Post to the Discord webhook
+send_price_drop_alert()  notifier.cpp     cpr::Post to the Telegram Bot API
         |
 main loop                main.cpp         sweep, timer, signals, per-cycle recovery
 ```
@@ -100,7 +106,7 @@ main loop                main.cpp         sweep, timer, signals, per-cycle recov
 | `geo.*`         | Europe/Turkey airport allowlist and place names        |
 | `api_client.*`  | Amadeus OAuth, fetching, defensive JSON parsing        |
 | `database.*`    | SQLite persistence, new-low detection per city pair    |
-| `notifier.*`    | Discord webhook delivery with retries                  |
+| `notifier.*`    | Telegram delivery, HTML escaping, retries              |
 | `main.cpp`      | configuration, sweep loop, graceful shutdown           |
 
 ### Why the city pair is the key
@@ -116,21 +122,29 @@ so an alert can show both the new trip and the one it beat.
 
 ## Testing
 
-`tools/mock_webhook_server.py` stands in for Discord on `127.0.0.1:8099`,
-returning whatever status code the path asks for:
+`tools/mock_telegram_server.py` stands in for the Telegram Bot API on
+`127.0.0.1:8099` and prints every message it receives, so the alert text can be
+checked without sending anything real:
 
 ```
-python tools/mock_webhook_server.py
+python tools/mock_telegram_server.py
 ```
 
-Then point the tracker at it:
+The token in the URL selects the behaviour, which is how the delivery paths are
+exercised:
+
+| Token      | Response                                    |
+|------------|---------------------------------------------|
+| anything   | `200 {"ok": true}` -- normal success        |
+| `fail`     | `401` -- revoked token, must not retry      |
+| `limit`    | `429` twice with `retry_after`, then success |
+| `broken`   | `500` -- must retry with backoff            |
 
 ```
-DISCORD_WEBHOOK_URL=http://127.0.0.1:8099/status/204 ./flight_tracker --once
+TELEGRAM_API_BASE=http://127.0.0.1:8099 TELEGRAM_BOT_TOKEN=test TELEGRAM_CHAT_ID=@test ./flight_tracker --once
 ```
 
-`/status/429` returns two rate-limit responses before succeeding, which
-exercises the retry path.
+`TELEGRAM_API_BASE` exists only for this. Leave it unset in production.
 
 ## Running it free, forever
 
@@ -141,11 +155,17 @@ history survives between runs and doubles as a git-diffable record.
 
 Add three repository secrets (Settings -> Secrets and variables -> Actions):
 
-| Secret                | Where to get it                              |
-|-----------------------|----------------------------------------------|
-| `DISCORD_WEBHOOK_URL` | Server Settings -> Integrations -> Webhooks  |
-| `AMADEUS_CLIENT_ID`   | developers.amadeus.com, free Self-Service app |
-| `AMADEUS_SECRET`      | same app                                     |
+| Secret               | Where to get it                                     |
+|----------------------|-----------------------------------------------------|
+| `TELEGRAM_BOT_TOKEN` | Message @BotFather, `/newbot`, copy the token       |
+| `TELEGRAM_CHAT_ID`   | `@your_channel`, or a numeric id for a private chat |
+| `AMADEUS_CLIENT_ID`  | developers.amadeus.com, free Self-Service app       |
+| `AMADEUS_SECRET`     | same app                                            |
+
+To alert a channel: create it in Telegram, add your bot as an **administrator**
+with permission to post, and use `@channelname` as the chat id. For a private
+chat instead, message the bot once and read the numeric id from
+`https://api.telegram.org/bot<TOKEN>/getUpdates`.
 
 Without `AMADEUS_CLIENT_ID` the scheduled job warns and exits rather than
 writing mock prices into the real history.
@@ -175,7 +195,7 @@ full libcurl build again.
 
 ## Status
 
-- [x] Build system, SQLite store, JSON parsing, Discord alerting, sweep loop
+- [x] Build system, SQLite store, JSON parsing, Telegram alerting, sweep loop
 - [x] CI on Windows/MSVC and Linux/GCC
 - [x] Amadeus Flight Inspiration Search with OAuth token caching
 - [x] Europe/Turkey region filter
