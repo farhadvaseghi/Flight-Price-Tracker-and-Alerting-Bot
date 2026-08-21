@@ -1,5 +1,7 @@
 #include "notifier.h"
 
+#include "geo.h"
+
 #include <cpr/cpr.h>
 #include <nlohmann/json.hpp>
 
@@ -143,20 +145,44 @@ std::string build_price_drop_payload(const FlightOffer&     offer,
         update.previous_lowest > 0.0 ? (saving / update.previous_lowest) * 100.0 : 0.0;
 
     std::ostringstream percent_text;
-    percent_text << std::fixed << std::setprecision(1) << percent << '%';
+    percent_text << std::fixed << std::setprecision(0) << percent << '%';
 
-    const json embed = {
-        {"title", "Price drop: " + offer.origin + " to " + offer.destination},
+    const geo::Place from = geo::lookup(offer.origin);
+    const geo::Place to   = geo::lookup(offer.destination);
+
+    std::ostringstream dates;
+    dates << offer.departure_date;
+    if (!offer.return_date.empty()) {
+        dates << "  to  " << offer.return_date
+              << "  (" << offer.nights() << " nights)";
+    }
+
+    json fields = json::array({
+        {{"name", "New price"}, {"value", money(update.current_price, offer.currency)}, {"inline", true}},
+        {{"name", "Previous"},  {"value", money(update.previous_lowest, offer.currency)}, {"inline", true}},
+        {{"name", "You save"},  {"value", money(saving, offer.currency) + "  (" + percent_text.str() + ")"}, {"inline", true}},
+        {{"name", "Dates"},     {"value", dates.str()}, {"inline", false}},
+    });
+
+    // The record price previously belonged to different dates; showing them
+    // makes it obvious the comparison is across trips, not a same-trip drop.
+    if (!update.previous_departure_date.empty() &&
+        update.previous_departure_date != offer.departure_date) {
+        fields.push_back({{"name", "Previous best was"},
+                          {"value", update.previous_departure_date},
+                          {"inline", false}});
+    }
+
+    json embed = {
+        {"title", from.city + " to " + to.city +
+                  (to.country.empty() ? "" : ", " + to.country)},
+        {"description", offer.origin + " to " + offer.destination},
         {"color", kColourGreen},
-        {"fields", json::array({
-            {{"name", "New price"},  {"value", money(update.current_price, offer.currency)},  {"inline", true}},
-            {{"name", "Previous"},   {"value", money(update.previous_lowest, offer.currency)}, {"inline", true}},
-            {{"name", "You save"},   {"value", money(saving, offer.currency) + "  (" + percent_text.str() + ")"}, {"inline", true}},
-            {{"name", "Departure"},  {"value", offer.departure_date},  {"inline", true}},
-            {{"name", "Airline"},    {"value", offer.airline},         {"inline", true}},
-        })},
+        {"fields", fields},
         {"footer", {{"text", "flight-price-tracker"}}},
     };
+
+    if (!offer.booking_link.empty()) embed["url"] = offer.booking_link;
 
     const json payload = {
         {"username", "Flight Tracker"},

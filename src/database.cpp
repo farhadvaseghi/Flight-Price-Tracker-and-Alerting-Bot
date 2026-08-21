@@ -70,6 +70,13 @@ public:
         return sqlite3_column_double(stmt_, index);
     }
 
+    // A NULL column yields a null pointer, which std::string cannot be built
+    // from, so map it to an empty string rather than crashing.
+    std::string column_text(int index) const {
+        const unsigned char* text = sqlite3_column_text(stmt_, index);
+        return text ? reinterpret_cast<const char*>(text) : std::string();
+    }
+
 private:
     void check(int rc) const {
         if (rc != SQLITE_OK) {
@@ -167,37 +174,61 @@ void Database::exec(const char* sql) {
     sqlite3_free(err);
 }
 
+
 void Database::initialize() {
-    // The UNIQUE constraint doubles as the lookup index for record_price(),
-    // so no separate CREATE INDEX is needed.
+    // The route key is the city pair, not the pair plus a date: the question
+    // this bot answers is "is FRA-IST cheaper than it has ever been", and the
+    // dates are the answer rather than part of the question. Keying on the
+    // date too would create thousands of rows that each need their own price
+    // history before they could ever alert.
+    //
+    // user_version tracks the schema so an older database is recognised
+    // instead of failing later with a confusing "no such column".
+    int current = 0;
+    {
+        Statement version(db_, "PRAGMA user_version");
+        if (version.step()) current = static_cast<int>(version.column_double(0));
+    }
+
+    if (current == 1) {
+        // v1 keyed on (origin, destination, departure_date). There is no
+        // meaningful way to fold those rows into the new key, and the data is
+        // only ever a price cache, so start the history over.
+        exec("DROP TABLE IF EXISTS routes");
+    }
+
     exec(
         "CREATE TABLE IF NOT EXISTS routes ("
         "  id             INTEGER PRIMARY KEY,"
         "  origin         TEXT NOT NULL,"
         "  destination    TEXT NOT NULL,"
-        "  departure_date TEXT NOT NULL,"
-        "  airline        TEXT NOT NULL DEFAULT '',"
-        "  currency       TEXT NOT NULL DEFAULT 'EUR',"
         "  lowest_price   REAL NOT NULL,"
+        "  currency       TEXT NOT NULL DEFAULT 'EUR',"
+        "  departure_date TEXT NOT NULL DEFAULT '',"   // dates behind the record
+        "  return_date    TEXT NOT NULL DEFAULT '',"
+        "  booking_link   TEXT NOT NULL DEFAULT '',"
         "  first_seen     TEXT NOT NULL,"
         "  last_checked   TEXT NOT NULL,"
         "  lowest_seen_at TEXT NOT NULL,"
-        "  UNIQUE (origin, destination, departure_date)"
+        "  UNIQUE (origin, destination)"
         ")");
+
+    exec("PRAGMA user_version = 2");
 }
 
-std::optional<double> Database::lowest_price(
-        const std::string& origin,
-        const std::string& destination,
-        const std::string& departure_date) const {
+std::optional<double> Database::lowest_price(const std::string& origin,
+                                             const std::string& destination) const {
     Statement select(db_,
-        "SELECT lowest_price FROM routes "
-        "WHERE origin = ?1 AND destination = ?2 AND departure_date = ?3");
-
-    select.bind(1, origin).bind(2, destination).bind(3, departure_date);
+        "SELECT lowest_price FROM routes WHERE origin = ?1 AND destination = ?2");
+    select.bind(1, origin).bind(2, destination);
 
     if (!select.step()) return std::nullopt;
     return select.column_double(0);
+}
+
+int Database::route_count() const {
+    Statement count(db_, "SELECT COUNT(*) FROM routes");
+    return count.step() ? static_cast<int>(count.column_double(0)) : 0;
 }
 
 PriceUpdate Database::record_price(const FlightOffer& offer) {
@@ -208,58 +239,71 @@ PriceUpdate Database::record_price(const FlightOffer& offer) {
 
     Transaction txn(db_);
 
-    // Read the historical low inside the transaction, so no concurrent writer
-    // can slip a cheaper price in between the SELECT and the UPDATE.
-    const std::optional<double> previous =
-        lowest_price(offer.origin, offer.destination, offer.departure_date);
+    // Read the existing record inside the transaction, so no concurrent writer
+    // can slip a cheaper price in between the SELECT and the UPDATE. The read
+    // is scoped so its cursor is finalised before we write to the same table.
+    bool exists = false;
+    {
+        Statement select(db_,
+            "SELECT lowest_price, departure_date, return_date FROM routes "
+            "WHERE origin = ?1 AND destination = ?2");
+        select.bind(1, offer.origin).bind(2, offer.destination);
 
-    if (!previous.has_value()) {
+        exists = select.step();
+        if (exists) {
+            result.previous_lowest         = select.column_double(0);
+            result.previous_departure_date = select.column_text(1);
+            result.previous_return_date    = select.column_text(2);
+        }
+    }
+
+    if (!exists) {
         result.first_sighting = true;
 
         Statement insert(db_,
-            "INSERT INTO routes (origin, destination, departure_date, airline,"
-            "                    currency, lowest_price, first_seen,"
-            "                    last_checked, lowest_seen_at) "
-            "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?7)");
+            "INSERT INTO routes (origin, destination, lowest_price, currency,"
+            "                    departure_date, return_date, booking_link,"
+            "                    first_seen, last_checked, lowest_seen_at) "
+            "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?8)");
 
         insert.bind(1, offer.origin)
               .bind(2, offer.destination)
-              .bind(3, offer.departure_date)
-              .bind(4, offer.airline)
-              .bind(5, offer.currency)
-              .bind(6, offer.price)
-              .bind(7, now);
+              .bind(3, offer.price)
+              .bind(4, offer.currency)
+              .bind(5, offer.departure_date)
+              .bind(6, offer.return_date)
+              .bind(7, offer.booking_link)
+              .bind(8, now);
         insert.step();
 
     } else {
-        result.previous_lowest = *previous;
-        result.new_low         = offer.price < (*previous - kPriceEpsilon);
+        result.new_low = offer.price < (result.previous_lowest - kPriceEpsilon);
 
         if (result.new_low) {
+            // The dates move with the price: the record belongs to whichever
+            // trip achieved it.
             Statement update(db_,
-                "UPDATE routes SET lowest_price = ?4, airline = ?5,"
-                "                  currency = ?6, last_checked = ?7,"
-                "                  lowest_seen_at = ?7 "
-                "WHERE origin = ?1 AND destination = ?2 AND departure_date = ?3");
+                "UPDATE routes SET lowest_price = ?3, currency = ?4,"
+                "                  departure_date = ?5, return_date = ?6,"
+                "                  booking_link = ?7, last_checked = ?8,"
+                "                  lowest_seen_at = ?8 "
+                "WHERE origin = ?1 AND destination = ?2");
 
             update.bind(1, offer.origin)
                   .bind(2, offer.destination)
-                  .bind(3, offer.departure_date)
-                  .bind(4, offer.price)
-                  .bind(5, offer.airline)
-                  .bind(6, offer.currency)
-                  .bind(7, now);
+                  .bind(3, offer.price)
+                  .bind(4, offer.currency)
+                  .bind(5, offer.departure_date)
+                  .bind(6, offer.return_date)
+                  .bind(7, offer.booking_link)
+                  .bind(8, now);
             update.step();
         } else {
             // Price held or rose: remember that we looked, nothing else.
             Statement touch(db_,
-                "UPDATE routes SET last_checked = ?4 "
-                "WHERE origin = ?1 AND destination = ?2 AND departure_date = ?3");
-
-            touch.bind(1, offer.origin)
-                 .bind(2, offer.destination)
-                 .bind(3, offer.departure_date)
-                 .bind(4, now);
+                "UPDATE routes SET last_checked = ?3 "
+                "WHERE origin = ?1 AND destination = ?2");
+            touch.bind(1, offer.origin).bind(2, offer.destination).bind(3, now);
             touch.step();
         }
     }

@@ -1,6 +1,13 @@
 {
-  "webhook_url": "https://discord.com/api/webhooks/REPLACE/WITH-YOUR-TOKEN",
-  "database_path": "flights.db",
-  "interval_seconds": 900,
-  "alert_on_new_route": false
+  "_comment": "Copy to config.json and edit. Secrets belong in the environment, not here: DISCORD_WEBHOOK_URL, AMADEUS_CLIENT_ID, AMADEUS_SECRET.",
+
+  "origins": ["FRA", "MUC", "BER", "DUS", "HAM", "CGN", "STR", "HAJ"],
+
+  "price_cap": 100,
+  "search_days": 90,
+  "min_nights": 2,
+  "max_nights": 4,
+
+  "interval_seconds": 21600,
+  "database_path": "flights.db"
 }

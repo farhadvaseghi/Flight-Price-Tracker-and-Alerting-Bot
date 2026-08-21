@@ -2,9 +2,15 @@
 
 [![build](https://github.com/farhadvaseghi/Flight-Price-Tracker-and-Alerting-Bot/actions/workflows/build.yml/badge.svg)](https://github.com/farhadvaseghi/Flight-Price-Tracker-and-Alerting-Bot/actions/workflows/build.yml)
 
-A small C++17 service that polls a flight-price REST API, stores the lowest price
-ever seen per route in SQLite, and fires a Discord webhook whenever a new low
-appears.
+Sweeps German airports for cheap return trips to Europe and Turkey, remembers the
+lowest price ever seen for each city pair in SQLite, and pings a Discord channel
+when a new low lands under your price cap.
+
+Data comes from Amadeus' **Flight Inspiration Search**, which returns every
+destination reachable from one origin in a single call -- so a sweep of eight
+German airports costs eight API calls, not hundreds. Destinations outside Europe
+and Turkey are filtered out locally against a bundled airport table, which costs
+no quota at all.
 
 ## Stack
 
@@ -36,15 +42,27 @@ minutes; later builds are incremental.
 
 ## Run
 
+No credentials? It falls back to a built-in mock payload, so the whole pipeline
+runs offline:
+
 ```
-flight_tracker --dry-run --once
+flight_tracker --once --dry-run
 ```
 
-| Flag             | Effect                                       |
-|------------------|----------------------------------------------|
-| `--once`         | run a single check and exit                  |
-| `--dry-run`      | print alerts instead of posting them         |
-| `--interval=N`   | seconds between checks (default 900, min 10) |
+With an Amadeus key, check the live path before trusting it:
+
+```
+flight_tracker --probe
+```
+
+| Flag              | Effect                                          |
+|-------------------|-------------------------------------------------|
+| `--once`          | run a single sweep and exit                     |
+| `--dry-run`       | print alerts instead of posting them            |
+| `--probe`         | one live API call, dumped raw                   |
+| `--cap=EUR`       | only alert below this price (default 100)       |
+| `--origins=A,B,C` | override the German airports to sweep           |
+| `--interval=N`    | seconds between sweeps (default 21600, min 10)  |
 
 Configuration is layered, later sources winning:
 **defaults → `config.json` → environment → CLI flags.**
@@ -63,33 +81,38 @@ to your channel.
 ## Architecture
 
 ```
-fetch_flight_data()      api_client.cpp   mock payload; swap for one cpr::Get
+fetch_flight_data()      api_client.cpp   Amadeus Inspiration Search, 1 call/origin
         |
-parse_flight_offers()    api_client.cpp   -> vector<FlightOffer> + rejections
+parse_flight_offers()    api_client.cpp   -> vector<FlightOffer>, non-EU/TR dropped
         |
-record_price()           database.cpp     one transaction: is this a new low?
+geo::in_region()         geo.cpp          bundled airport table, no API calls
+        |
+record_price()           database.cpp     one transaction: new low for this city pair?
         |
 send_price_drop_alert()  notifier.cpp     cpr::Post to the Discord webhook
         |
-main loop                main.cpp         timer, signals, per-cycle recovery
+main loop                main.cpp         sweep, timer, signals, per-cycle recovery
 ```
 
-| File            | Responsibility                                       |
-|-----------------|------------------------------------------------------|
-| `flight.h`      | `FlightOffer`, the type shared by every layer         |
-| `api_client.*`  | fetching and defensive JSON parsing                   |
-| `database.*`    | SQLite persistence, new-low detection                 |
-| `notifier.*`    | Discord webhook delivery with retries                 |
-| `main.cpp`      | configuration, polling loop, graceful shutdown        |
+| File            | Responsibility                                        |
+|-----------------|-------------------------------------------------------|
+| `flight.h/.cpp` | `FlightOffer`, the type shared by every layer          |
+| `geo.*`         | Europe/Turkey airport allowlist and place names        |
+| `api_client.*`  | Amadeus OAuth, fetching, defensive JSON parsing        |
+| `database.*`    | SQLite persistence, new-low detection per city pair    |
+| `notifier.*`    | Discord webhook delivery with retries                  |
+| `main.cpp`      | configuration, sweep loop, graceful shutdown           |
 
-## Going live
+### Why the city pair is the key
 
-`fetch_flight_data()` returns a hardcoded payload. Replace its body with a real
-request — the shape is already written out in a comment there — and nothing else
-changes, because the parser already handles empty and malformed bodies.
+`routes` is keyed on `(origin, destination)`, not on the departure date. The
+question this bot answers is *"is Frankfurt to Istanbul cheaper than it has ever
+been"* -- the dates are the answer, not part of the question. Keying on the date
+too would create thousands of rows that each need their own price history before
+they could ever alert.
 
-If your API's JSON differs from the mock's, `parse_flight_offers()` is the only
-other place to touch.
+The dates behind the record price are stored as metadata and move with it,
+so an alert can show both the new trip and the one it beat.
 
 ## Testing
 
@@ -109,6 +132,39 @@ DISCORD_WEBHOOK_URL=http://127.0.0.1:8099/status/204 ./flight_tracker --once
 `/status/429` returns two rate-limit responses before succeeding, which
 exercises the retry path.
 
+## Running it free, forever
+
+`.github/workflows/track.yml` runs a sweep every 6 hours on GitHub Actions,
+which is free with unlimited minutes on public repositories -- no server, no
+card. `flights.db` is committed back to the repo after each sweep, so the price
+history survives between runs and doubles as a git-diffable record.
+
+Add three repository secrets (Settings -> Secrets and variables -> Actions):
+
+| Secret                | Where to get it                              |
+|-----------------------|----------------------------------------------|
+| `DISCORD_WEBHOOK_URL` | Server Settings -> Integrations -> Webhooks  |
+| `AMADEUS_CLIENT_ID`   | developers.amadeus.com, free Self-Service app |
+| `AMADEUS_SECRET`      | same app                                     |
+
+Without `AMADEUS_CLIENT_ID` the scheduled job warns and exits rather than
+writing mock prices into the real history.
+
+**Quota arithmetic.** One API call covers one origin, so:
+
+```
+8 origins x every 6 hours x 30 days =   960 calls/month
+8 origins x every hour    x 30 days = 5,760 calls/month
+```
+
+Fares do not move hourly, so the 6-hour default costs nothing in practice.
+Check the current quota on your Amadeus dashboard before raising it.
+
+Two honest limits: GitHub runs scheduled jobs late under load and occasionally
+skips one, which is irrelevant at this cadence; and scheduled workflows are
+disabled after 60 days of repository inactivity, which the price-history commits
+should prevent.
+
 ## Continuous integration
 
 `.github/workflows/build.yml` builds on every push and pull request, on
@@ -119,8 +175,9 @@ full libcurl build again.
 
 ## Status
 
-- [x] Step 1 — build system
-- [x] Step 2 — SQLite persistence layer
-- [x] Step 3 — JSON parsing of the (mocked) API response
-- [x] Step 4 — Discord webhook alerting
-- [x] Step 5 — main polling loop
+- [x] Build system, SQLite store, JSON parsing, Discord alerting, sweep loop
+- [x] CI on Windows/MSVC and Linux/GCC
+- [x] Amadeus Flight Inspiration Search with OAuth token caching
+- [x] Europe/Turkey region filter
+- [x] Scheduled sweeps on GitHub Actions with committed price history
+- [ ] Verify the live Amadeus path with `--probe` (needs a key)
