@@ -1,0 +1,75 @@
+name: build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+
+    strategy:
+      # Report every platform's result, rather than cancelling the rest as
+      # soon as one fails.
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-msvc
+            os: windows-latest
+            configure: -G "Visual Studio 17 2022" -A x64
+            build: --config Release
+            binary: build/bin/flight_tracker.exe
+          - name: ubuntu-gcc
+            os: ubuntu-latest
+            configure: -DCMAKE_BUILD_TYPE=Release
+            build: -j 4
+            binary: build/bin/flight_tracker
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # cpr, libcurl, zlib, nlohmann/json and the SQLite amalgamation are all
+      # fetched and compiled from source, which dominates the build time. They
+      # only change when CMakeLists.txt pins a different version, so key the
+      # cache on that file and keep them out of the build tree so a wiped
+      # build/ does not take them with it.
+      - name: Cache fetched dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.deps
+          key: deps-${{ matrix.name }}-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: deps-${{ matrix.name }}-
+
+      - name: Configure
+        run: >
+          cmake -S . -B build ${{ matrix.configure }}
+          -DFETCHCONTENT_BASE_DIR=${{ github.workspace }}/.deps
+
+      - name: Build
+        run: cmake --build build ${{ matrix.build }}
+
+      # A binary that links is not the same as a binary that runs. --dry-run
+      # keeps this offline and posts nothing: no webhook, no API, no network.
+      - name: Smoke test
+        shell: bash
+        run: |
+          ${{ matrix.binary }} --help
+          output=$(${{ matrix.binary }} --once --dry-run)
+          echo "$output"
+          # The mock payload holds three usable offers and three malformed
+          # ones, so anything else means the parser or the store regressed.
+          echo "$output" | grep -q "3 parsed, 3 skipped, 3 stored" \
+            || { echo "::error::unexpected cycle result"; exit 1; }
+          echo "$output" | grep -q "shutting down cleanly" \
+            || { echo "::error::did not shut down cleanly"; exit 1; }
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: flight_tracker-${{ matrix.name }}
+          path: ${{ matrix.binary }}
+          if-no-files-found: error

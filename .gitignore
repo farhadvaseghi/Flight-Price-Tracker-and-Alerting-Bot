@@ -3,6 +3,7 @@ build/
 out/
 cmake-build-*/
 _deps/
+.deps/
 
 # IDE / editor
 .vs/

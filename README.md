@@ -1,5 +1,7 @@
 # Flight Price Tracker & Alerting Bot
 
+[![build](https://github.com/farhadvaseghi/Flight-Price-Tracker-and-Alerting-Bot/actions/workflows/build.yml/badge.svg)](https://github.com/farhadvaseghi/Flight-Price-Tracker-and-Alerting-Bot/actions/workflows/build.yml)
+
 A small C++17 service that polls a flight-price REST API, stores the lowest price
 ever seen per route in SQLite, and fires a Discord webhook whenever a new low
 appears.
@@ -106,6 +108,14 @@ DISCORD_WEBHOOK_URL=http://127.0.0.1:8099/status/204 ./flight_tracker --once
 
 `/status/429` returns two rate-limit responses before succeeding, which
 exercises the retry path.
+
+## Continuous integration
+
+`.github/workflows/build.yml` builds on every push and pull request, on
+Windows with MSVC and on Linux with GCC, then runs `--once --dry-run` as a
+smoke test and uploads the binary as an artifact. Fetched dependencies are
+cached against the hash of `CMakeLists.txt`, so only a version bump pays the
+full libcurl build again.
 
 ## Status
 
