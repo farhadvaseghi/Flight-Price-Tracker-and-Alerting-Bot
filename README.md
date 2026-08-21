@@ -20,8 +20,8 @@ install is required.
 ## Build (Windows)
 
 ```
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Release
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
 ```
 
 The binary lands in `build/bin/flight_tracker.exe`.
@@ -32,7 +32,7 @@ amalgamation, so it takes a few minutes. Later configures are cached.
 ## Status
 
 - [x] Step 1 — build system
-- [ ] Step 2 — SQLite persistence layer
+- [x] Step 2 — SQLite persistence layer
 - [ ] Step 3 — JSON parsing of the (mocked) API response
 - [ ] Step 4 — Discord webhook alerting
 - [ ] Step 5 — main polling loop

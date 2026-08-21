@@ -16,6 +16,14 @@ endif()
 
 include(FetchContent)
 
+# Timestamp extracted archives at extraction time, so a re-download actually
+# retriggers dependent steps. The policy only exists on CMake >= 3.24; the
+# DOWNLOAD_EXTRACT_TIMESTAMP option that replaces it does NOT exist on 3.22,
+# where it would silently be parsed as part of the URL list.
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+endif()
+
 # ---------------------------------------------------------------------------
 # nlohmann/json  (header-only)
 # ---------------------------------------------------------------------------
@@ -54,7 +62,6 @@ FetchContent_Declare(
 FetchContent_Declare(
     sqlite3
     URL https://www.sqlite.org/2024/sqlite-amalgamation-3450100.zip
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 
 FetchContent_MakeAvailable(nlohmann_json cpr sqlite3)
@@ -77,6 +84,7 @@ endif()
 # ---------------------------------------------------------------------------
 add_executable(flight_tracker
     src/main.cpp
+    src/database.cpp
 )
 
 target_link_libraries(flight_tracker PRIVATE
