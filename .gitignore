@@ -1,0 +1,23 @@
+# Build output
+build/
+out/
+cmake-build-*/
+_deps/
+
+# IDE / editor
+.vs/
+.vscode/
+.idea/
+*.user
+
+# Runtime artefacts
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Secrets (webhook URLs, API keys)
+config.json
+.env
+build_configure.log
+build_compile.log
