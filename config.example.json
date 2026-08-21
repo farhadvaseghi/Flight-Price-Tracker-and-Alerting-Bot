@@ -1,5 +1,5 @@
 {
-  "_comment": "Copy to config.json and edit. The bot token is a secret and is read from TELEGRAM_BOT_TOKEN only - never put it here.",
+  "_comment": "Copy to config.json and edit. Secrets are environment-only and cannot be set here: TELEGRAM_BOT_TOKEN and TRAVELPAYOUTS_TOKEN.",
 
   "telegram_chat_id": "@your_channel_name",
 

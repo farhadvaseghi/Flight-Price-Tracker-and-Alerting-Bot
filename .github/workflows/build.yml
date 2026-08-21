@@ -101,12 +101,14 @@ jobs:
           ${{ matrix.binary }} --help
 
           # One origin, so the expected counts do not move when the default
-          # origin list changes. The mock payload holds six entries: two usable
-          # (IST, LIS), one outside the region (JFK), and three malformed.
+          # origin list changes. The mock payload holds seven entries: two
+          # usable (IST, LIS), two outside the region (JFK and an entry with no
+          # destination), one trip too long, one departing beyond the window,
+          # and one with an unparseable price.
           output=$(${{ matrix.binary }} --once --dry-run --origins=FRA)
           echo "$output"
 
-          expected="1 calls, 2 offers, 1 out of region, 3 rejected, 1 under cap, 0 alerts"
+          expected="1 calls, 2 offers, 4 filtered, 1 malformed, 1 under cap, 0 alerts"
           echo "$output" | grep -q "$expected" \
             || { echo "::error::sweep result changed; expected: $expected"; exit 1; }
 

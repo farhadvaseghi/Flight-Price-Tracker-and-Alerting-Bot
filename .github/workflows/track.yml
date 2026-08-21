@@ -2,9 +2,9 @@ name: track
 
 on:
   schedule:
-    # Every 6 hours. With 8 origins that is 32 API calls a day, roughly 960 a
-    # month, which sits inside the Amadeus free tier. Raising the frequency or
-    # the origin count multiplies both numbers.
+    # Every 6 hours. With 8 origins that is 32 calls a day, far inside the
+    # documented 200-per-hour limit. Raising the frequency or the origin count
+    # multiplies both numbers.
     - cron: "0 */6 * * *"
   workflow_dispatch:      # manual "run now" button
     inputs:
@@ -47,14 +47,13 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
-          AMADEUS_CLIENT_ID:  ${{ secrets.AMADEUS_CLIENT_ID }}
-          AMADEUS_SECRET:     ${{ secrets.AMADEUS_SECRET }}
+          TRAVELPAYOUTS_TOKEN: ${{ secrets.TRAVELPAYOUTS_TOKEN }}
         run: |
           # Without credentials the tracker falls back to its mock payload,
           # which would write nonsense into the real price history. Better to
           # say so plainly than to record fiction.
-          if [ -z "$AMADEUS_CLIENT_ID" ]; then
-            echo "::warning::AMADEUS_CLIENT_ID is not set; skipping the sweep"
+          if [ -z "$TRAVELPAYOUTS_TOKEN" ]; then
+            echo "::warning::TRAVELPAYOUTS_TOKEN is not set; skipping the sweep"
             exit 0
           fi
           build/bin/flight_tracker --once ${{ inputs.dry_run && '--dry-run' || '' }}

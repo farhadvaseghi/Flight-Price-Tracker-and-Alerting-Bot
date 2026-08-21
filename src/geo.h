@@ -12,9 +12,9 @@ struct Place {
 
 // True when `iata` is an airport in Europe or Turkey that we care about.
 //
-// This is an allowlist, deliberately. Amadeus returns destinations worldwide,
-// and resolving each one's country through the reference-data API would spend
-// quota on every new airport. A bundled table costs nothing, works offline,
+// This is an allowlist, deliberately. The API returns destinations worldwide,
+// and resolving each one's country through a lookup endpoint would spend a
+// request on every new airport. A bundled table costs nothing, works offline,
 // and treats anything unknown as "not our region" -- which conveniently also
 // keeps obscure airfields out of the alerts.
 bool in_region(const std::string& iata);

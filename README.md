@@ -6,11 +6,16 @@ Sweeps German airports for cheap return trips to Europe and Turkey, remembers th
 lowest price ever seen for each city pair in SQLite, and pings a Telegram
 channel when a new low lands under your price cap.
 
-Data comes from Amadeus' **Flight Inspiration Search**, which returns every
-destination reachable from one origin in a single call -- so a sweep of eight
-German airports costs eight API calls, not hundreds. Destinations outside Europe
-and Turkey are filtered out locally against a bundled airport table, which costs
-no quota at all.
+Prices come from the **Travelpayouts Data API** (`city-directions`), which
+returns the cheapest cached fare to every destination reachable from one origin
+in a single call -- so a sweep of eight German airports costs eight requests,
+not hundreds. Destinations outside Europe and Turkey are filtered out locally
+against a bundled airport table, which costs no requests at all.
+
+> Amadeus' Self-Service API was the original data source. It was decommissioned
+> on 17 July 2026 and existing keys stopped working, so the project moved to
+> Travelpayouts. The swap touched only `api_client.*` -- the store, the region
+> filter and the alerting were unaffected.
 
 ## Stack
 
@@ -49,7 +54,7 @@ runs offline:
 flight_tracker --once --dry-run
 ```
 
-With an Amadeus key, check the live path before trusting it:
+With an API token, check the live path before trusting it:
 
 ```
 flight_tracker --probe
@@ -72,8 +77,7 @@ Configuration is layered, later sources winning:
 |----------------|-----------------------------|------------------------|
 | Bot token      | — (secret, env only)         | `TELEGRAM_BOT_TOKEN`   |
 | Chat id        | `telegram_chat_id`          | `TELEGRAM_CHAT_ID`     |
-| Amadeus key    | — (secret, env only)         | `AMADEUS_CLIENT_ID`    |
-| Amadeus secret | — (secret, env only)         | `AMADEUS_SECRET`       |
+| Flight API token | — (secret, env only)       | `TRAVELPAYOUTS_TOKEN`  |
 | Database       | `database_path`             | `FLIGHT_TRACKER_DB`    |
 | Origins        | `origins`                   | —                      |
 | Price cap      | `price_cap`                 | —                      |
@@ -88,7 +92,7 @@ set in the file at all: anyone holding the bot token can post as your bot.
 ## Architecture
 
 ```
-fetch_flight_data()      api_client.cpp   Amadeus Inspiration Search, 1 call/origin
+fetch_flight_data()      api_client.cpp   city-directions, 1 request per origin
         |
 parse_flight_offers()    api_client.cpp   -> vector<FlightOffer>, non-EU/TR dropped
         |
@@ -105,7 +109,7 @@ main loop                main.cpp         sweep, timer, signals, per-cycle recov
 |-----------------|-------------------------------------------------------|
 | `flight.h/.cpp` | `FlightOffer`, the type shared by every layer          |
 | `geo.*`         | Europe/Turkey airport allowlist and place names        |
-| `api_client.*`  | Amadeus OAuth, fetching, defensive JSON parsing        |
+| `api_client.*`  | fetching, defensive JSON parsing, date/length filters  |
 | `database.*`    | SQLite persistence, new-low detection per city pair    |
 | `notifier.*`    | Telegram delivery, HTML escaping, retries              |
 | `main.cpp`      | configuration, sweep loop, graceful shutdown           |
@@ -160,8 +164,7 @@ Add three repository secrets (Settings -> Secrets and variables -> Actions):
 |----------------------|-----------------------------------------------------|
 | `TELEGRAM_BOT_TOKEN` | Message @BotFather, `/newbot`, copy the token       |
 | `TELEGRAM_CHAT_ID`   | `@your_channel`, or a numeric id for a private chat |
-| `AMADEUS_CLIENT_ID`  | developers.amadeus.com, free Self-Service app       |
-| `AMADEUS_SECRET`     | same app                                            |
+| `TRAVELPAYOUTS_TOKEN` | travelpayouts.com, free signup, token is in your profile |
 
 Confirm the Telegram side works before waiting on a real price drop:
 
@@ -178,18 +181,13 @@ with permission to post, and use `@channelname` as the chat id. For a private
 chat instead, message the bot once and read the numeric id from
 `https://api.telegram.org/bot<TOKEN>/getUpdates`.
 
-Without `AMADEUS_CLIENT_ID` the scheduled job warns and exits rather than
+Without `TRAVELPAYOUTS_TOKEN` the scheduled job warns and exits rather than
 writing mock prices into the real history.
 
-**Quota arithmetic.** One API call covers one origin, so:
-
-```
-8 origins x every 6 hours x 30 days =   960 calls/month
-8 origins x every hour    x 30 days = 5,760 calls/month
-```
-
-Fares do not move hourly, so the 6-hour default costs nothing in practice.
-Check the current quota on your Amadeus dashboard before raising it.
+**Request arithmetic.** One request covers one origin, so eight origins every
+six hours is 32 requests a day -- far inside the documented 200-per-hour limit.
+Fares do not move hourly, and the API serves cached data anyway, so polling
+harder buys nothing.
 
 Two honest limits: GitHub runs scheduled jobs late under load and occasionally
 skips one, which is irrelevant at this cadence; and scheduled workflows are
@@ -208,7 +206,7 @@ full libcurl build again.
 
 - [x] Build system, SQLite store, JSON parsing, Telegram alerting, sweep loop
 - [x] CI on Windows/MSVC and Linux/GCC
-- [x] Amadeus Flight Inspiration Search with OAuth token caching
+- [x] Travelpayouts `city-directions` integration
 - [x] Europe/Turkey region filter
 - [x] Scheduled sweeps on GitHub Actions with committed price history
-- [ ] Verify the live Amadeus path with `--probe` (needs a key)
+- [ ] Verify the live API path with `--probe` (needs a token)

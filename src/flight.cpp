@@ -1,6 +1,7 @@
 #include "flight.h"
 
 #include <cstdlib>
+#include <ctime>
 
 namespace {
 
@@ -42,4 +43,18 @@ int FlightOffer::nights() const {
 
     const long long diff = days_from_civil(ry, rm, rd) - days_from_civil(dy, dm, dd);
     return diff > 0 ? static_cast<int>(diff) : 0;
+}
+
+std::string date_offset_utc(int offset_days) {
+    const std::time_t when =
+        std::time(nullptr) + static_cast<std::time_t>(offset_days) * 86400;
+    std::tm tm{};
+#ifdef _WIN32
+    gmtime_s(&tm, &when);
+#else
+    gmtime_r(&when, &tm);
+#endif
+    char buffer[16] = {};
+    std::strftime(buffer, sizeof(buffer), "%Y-%m-%d", &tm);
+    return buffer;
 }

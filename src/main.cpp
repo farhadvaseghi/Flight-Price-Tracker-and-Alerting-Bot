@@ -39,7 +39,7 @@ extern "C" void handle_signal(int) {
 
 struct Config {
     notify::Telegram         alerts;                   // bot token is secret
-    api::Credentials         amadeus;                  // secret
+    api::Credentials         flights;                  // API token is secret
     std::string              database_path = "flights.db";
     std::vector<std::string> origins;                  // German airports
     int         search_days      = 90;                 // how far ahead to look
@@ -110,9 +110,8 @@ Config load_config(int argc, char** argv) {
     config.alerts.chat_id        = env_or("TELEGRAM_CHAT_ID", config.alerts.chat_id);
     config.alerts.api_base       = env_or("TELEGRAM_API_BASE", config.alerts.api_base);
     config.database_path         = env_or("FLIGHT_TRACKER_DB", config.database_path);
-    config.amadeus.client_id     = env_or("AMADEUS_CLIENT_ID", config.amadeus.client_id);
-    config.amadeus.client_secret = env_or("AMADEUS_SECRET", config.amadeus.client_secret);
-    config.amadeus.host          = env_or("AMADEUS_HOST", config.amadeus.host);
+    config.flights.token         = env_or("TRAVELPAYOUTS_TOKEN", config.flights.token);
+    config.flights.host          = env_or("FLIGHT_API_HOST", config.flights.host);
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -146,11 +145,10 @@ Config load_config(int argc, char** argv) {
                 "environment:\n"
                 "  TELEGRAM_BOT_TOKEN    bot token from @BotFather\n"
                 "  TELEGRAM_CHAT_ID      channel (@name) or numeric chat id\n"
-                "  AMADEUS_CLIENT_ID     Amadeus Self-Service key\n"
-                "  AMADEUS_SECRET        Amadeus Self-Service secret\n"
+                "  TRAVELPAYOUTS_TOKEN   Travelpayouts affiliate API token\n"
                 "  FLIGHT_TRACKER_DB     database file (default flights.db)\n\n"
-                "Without Amadeus credentials the tracker runs against a built-in\n"
-                "mock payload, so the pipeline can be exercised offline.\n";
+                "Without an API token the tracker runs against a built-in mock\n"
+                "payload, so the whole pipeline can be exercised offline.\n";
             std::exit(0);
         } else {
             std::cerr << "warning: ignoring unknown argument '" << arg << "'\n";
@@ -186,20 +184,6 @@ std::string money(double amount, const std::string& currency) {
     return out.str();
 }
 
-// "YYYY-MM-DD" for today plus `offset_days`, in UTC.
-std::string date_offset(int offset_days) {
-    const std::time_t when = std::time(nullptr) +
-                             static_cast<std::time_t>(offset_days) * 86400;
-    std::tm tm{};
-#ifdef _WIN32
-    gmtime_s(&tm, &when);
-#else
-    gmtime_r(&when, &tm);
-#endif
-    std::ostringstream out;
-    out << std::put_time(&tm, "%Y-%m-%d");
-    return out.str();
-}
 
 // ---------------------------------------------------------------------------
 // One sweep across every origin
@@ -218,31 +202,39 @@ struct CycleStats {
 
 api::SearchParams params_for(const Config& config, const std::string& origin) {
     api::SearchParams params;
-    params.origin = origin;
-    // Tomorrow onward: today's departures are not actionable.
-    params.departure_window = date_offset(1) + "," + date_offset(config.search_days);
-    params.min_nights = config.min_nights;
-    params.max_nights = config.max_nights;
-    // Ask the API for the cap too, so it returns fewer, more relevant rows.
-    params.max_price  = config.price_cap;
+    params.origin   = origin;
+    params.currency = "eur";
     return params;
+}
+
+// city-directions cannot constrain dates or trip length in the request, so the
+// narrowing happens after the fetch.
+api::Filters filters_for(const Config& config) {
+    api::Filters filters;
+    // Tomorrow onward: today's departures are not actionable.
+    filters.earliest_departure = date_offset_utc(1);
+    filters.latest_departure   = date_offset_utc(config.search_days);
+    filters.min_nights         = config.min_nights;
+    filters.max_nights         = config.max_nights;
+    return filters;
 }
 
 CycleStats run_cycle(const Config& config, db::Database& store) {
     CycleStats stats;
-    const bool live = config.amadeus.present();
+    const bool         live    = config.flights.present();
+    const api::Filters filters = filters_for(config);
 
     for (const std::string& origin : config.origins) {
         if (g_shutdown_requested.load(std::memory_order_relaxed)) break;
 
         const std::string payload =
-            live ? api::fetch_flight_data(config.amadeus, params_for(config, origin))
+            live ? api::fetch_flight_data(config.flights, params_for(config, origin))
                  : api::mock_flight_data();
         ++stats.calls;
 
-        const api::ParseResult parsed = api::parse_flight_offers(payload);
+        const api::ParseResult parsed = api::parse_flight_offers(payload, filters);
         stats.parsed   += static_cast<int>(parsed.offers.size());
-        stats.filtered += parsed.filtered;
+        stats.filtered += parsed.rejected();
         stats.skipped  += static_cast<int>(parsed.problems.size());
 
         if (parsed.offers.empty() && !parsed.problems.empty()) {
@@ -324,8 +316,8 @@ int run_test_alert(const Config& config) {
     FlightOffer offer;
     offer.origin         = "FRA";
     offer.destination    = "IST";
-    offer.departure_date = date_offset(30);
-    offer.return_date    = date_offset(33);
+    offer.departure_date = date_offset_utc(30);
+    offer.return_date    = date_offset_utc(33);
     offer.currency       = "EUR";
     offer.price          = 89.0;
 
@@ -360,47 +352,57 @@ int run_test_alert(const Config& config) {
     return 1;
 }
 
-// One live call, printed raw. The fastest way to find out whether Amadeus'
-// free test tier actually serves Flight Inspiration Search for a given origin,
-// before trusting anything built on top of it.
+// One live call, printed raw, plus what the parser makes of it. The fastest
+// way to find out whether the API actually serves a given German origin before
+// trusting anything built on top of it.
 int run_probe(const Config& config) {
-    if (!config.amadeus.present()) {
-        std::cerr << "--probe needs AMADEUS_CLIENT_ID and AMADEUS_SECRET\n";
+    if (!config.flights.present()) {
+        std::cerr << "--probe needs TRAVELPAYOUTS_TOKEN\n";
         return 1;
     }
 
-    const std::string origin = config.origins.front();
-    const api::SearchParams params = params_for(config, origin);
+    const std::string       origin  = config.origins.front();
+    const api::SearchParams params  = params_for(config, origin);
+    const api::Filters      filters = filters_for(config);
 
-    log() << "probing " << config.amadeus.host << " for origin " << origin << '\n';
-    log() << "  window " << params.departure_window
-          << ", " << params.min_nights << '-' << params.max_nights << " nights"
-          << ", cap " << params.max_price << '\n';
+    log() << "probing " << config.flights.host << " for origin " << origin << '\n';
+    log() << "  window " << filters.earliest_departure << " to "
+          << filters.latest_departure << ", " << filters.min_nights << '-'
+          << filters.max_nights << " nights\n";
 
-    const std::string token = api::access_token(config.amadeus);
-    if (token.empty()) {
-        std::cerr << "token request failed: check the credentials and the host\n";
-        return 1;
-    }
-    log() << "  token acquired (" << token.size() << " chars)\n";
-
-    const std::string body = api::fetch_flight_data(config.amadeus, params);
+    const std::string body = api::fetch_flight_data(config.flights, params);
     if (body.empty()) {
-        std::cerr << "search returned nothing: this origin may be unsupported "
-                     "on the free test tier\n";
+        std::cerr << "request failed or returned nothing. Check the token, and\n"
+                     "that this origin is a city code the API knows.\n";
         return 1;
     }
 
     std::cout << "\n--- raw response ---\n" << body << "\n--- end ---\n\n";
 
-    const api::ParseResult parsed = api::parse_flight_offers(body);
-    log() << "parsed " << parsed.offers.size() << " in-region offers, "
-          << parsed.filtered << " filtered out, "
-          << parsed.problems.size() << " rejected\n";
+    const api::ParseResult parsed = api::parse_flight_offers(body, filters);
+
+    log() << "parsed " << parsed.offers.size() << " usable offers\n";
+    log() << "  dropped: " << parsed.out_of_region << " outside Europe/Turkey, "
+          << parsed.out_of_window << " outside the date window, "
+          << parsed.wrong_length << " wrong trip length\n";
+
+    for (const std::string& problem : parsed.problems) {
+        log() << "  malformed: " << problem << '\n';
+    }
+
     for (const FlightOffer& offer : parsed.offers) {
+        const geo::Place to = geo::lookup(offer.destination);
         log() << "  " << offer.origin << "->" << offer.destination
               << "  " << money(offer.price, offer.currency)
-              << "  " << offer.departure_date << " +" << offer.nights() << "n\n";
+              << "  " << offer.departure_date << " +" << offer.nights() << "n"
+              << "  (" << to.city << ")\n";
+    }
+
+    // A response that parses to nothing is the interesting failure, so say what
+    // to try rather than leaving an empty list.
+    if (parsed.offers.empty()) {
+        log() << "nothing usable. Widen the window with a larger search_days, or\n"
+                 "relax min_nights/max_nights, then probe again.\n";
     }
     return 0;
 }
@@ -420,11 +422,11 @@ int main(int argc, char** argv) {
     if (config.test_alert) return run_test_alert(config);
     if (config.probe)      return run_probe(config);
 
-    const bool live = config.amadeus.present();
+    const bool live = config.flights.present();
 
     log() << "flight tracker starting\n";
-    log() << "  source   : " << (live ? "Amadeus (" + config.amadeus.host + ")"
-                                      : "built-in mock (no credentials)") << '\n';
+    log() << "  source   : " << (live ? config.flights.host
+                                      : "built-in mock (no API token)") << '\n';
     log() << "  origins  : " << config.origins.size() << " German airports\n";
     log() << "  window   : next " << config.search_days << " days, "
           << config.min_nights << '-' << config.max_nights << " nights\n";
@@ -455,8 +457,8 @@ int main(int argc, char** argv) {
                 log() << "sweep " << cycle << " done: "
                       << stats.calls << " calls, "
                       << stats.parsed << " offers, "
-                      << stats.filtered << " out of region, "
-                      << stats.skipped << " rejected, "
+                      << stats.filtered << " filtered, "
+                      << stats.skipped << " malformed, "
                       << stats.below_cap << " under cap, "
                       << stats.alerts << " alerts";
                 if (stats.failed_alerts > 0) {

@@ -8,9 +8,9 @@
 // of JSON, database stores them, notifier turns the interesting ones into
 // Telegram messages.
 //
-// Amadeus' Flight Inspiration Search returns a matched outbound/return pair as
-// a single priced offer, so departure_date and return_date belong to the same
-// trip and `price` is the total for both legs.
+// The API returns a matched outbound/return pair as a single priced offer, so
+// departure_date and return_date belong to the same trip and `price` is the
+// total for both legs.
 struct FlightOffer {
     std::string origin;          // IATA code, e.g. "FRA"
     std::string destination;     // IATA code, e.g. "IST"
@@ -23,3 +23,6 @@ struct FlightOffer {
     // Nights between the two legs, or 0 when one-way / dates unparseable.
     int nights() const;
 };
+
+// "YYYY-MM-DD" for today plus `offset_days`, in UTC.
+std::string date_offset_utc(int offset_days);
