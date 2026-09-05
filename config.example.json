@@ -6,6 +6,7 @@
   "origins": ["BER", "CGN", "HHN", "NUE", "FMM", "HAM", "FKB", "FMO", "PAD", "BRE"],
 
   "price_cap": 100,
+  "min_drop_percent": 10,
   "search_days": 90,
   "min_nights": 2,
   "max_nights": 4,

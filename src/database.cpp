@@ -210,10 +210,24 @@ void Database::initialize() {
         "  first_seen     TEXT NOT NULL,"
         "  last_checked   TEXT NOT NULL,"
         "  lowest_seen_at TEXT NOT NULL,"
+        "  alert_baseline REAL NOT NULL DEFAULT 0,"       // what drops are measured from
         "  UNIQUE (origin, destination)"
         ")");
 
-    exec("PRAGMA user_version = 2");
+    // v2 -> v3 adds alert_baseline. Unlike the v1 break above this is a
+    // widening change, so the rows are migrated rather than discarded: the
+    // price history is months of observations that cannot be re-fetched.
+    //
+    // Existing rows are seeded from lowest_price. Leaving them at 0 would be
+    // wrong in a way that is easy to miss: the baseline would fall back to the
+    // record, which moves on every new low, and the accumulation this column
+    // exists to provide would not start working until the first alert fired.
+    if (current == 2) {
+        exec("ALTER TABLE routes ADD COLUMN alert_baseline REAL NOT NULL DEFAULT 0");
+        exec("UPDATE routes SET alert_baseline = lowest_price");
+    }
+
+    exec("PRAGMA user_version = 3");
 }
 
 std::optional<double> Database::lowest_price(const std::string& origin,
@@ -224,6 +238,16 @@ std::optional<double> Database::lowest_price(const std::string& origin,
 
     if (!select.step()) return std::nullopt;
     return select.column_double(0);
+}
+
+void Database::mark_alerted(const std::string& origin,
+                            const std::string& destination,
+                            double             price) {
+    Statement update(db_,
+        "UPDATE routes SET alert_baseline = ?3 "
+        "WHERE origin = ?1 AND destination = ?2");
+    update.bind(1, origin).bind(2, destination).bind(3, price);
+    update.step();
 }
 
 int Database::route_count() const {
@@ -242,11 +266,12 @@ PriceUpdate Database::record_price(const FlightOffer& offer) {
     // Read the existing record inside the transaction, so no concurrent writer
     // can slip a cheaper price in between the SELECT and the UPDATE. The read
     // is scoped so its cursor is finalised before we write to the same table.
-    bool exists = false;
+    bool   exists         = false;
+    double stored_baseline = 0.0;
     {
         Statement select(db_,
-            "SELECT lowest_price, departure_date, return_date FROM routes "
-            "WHERE origin = ?1 AND destination = ?2");
+            "SELECT lowest_price, departure_date, return_date, alert_baseline "
+            "FROM routes WHERE origin = ?1 AND destination = ?2");
         select.bind(1, offer.origin).bind(2, offer.destination);
 
         exists = select.step();
@@ -254,6 +279,7 @@ PriceUpdate Database::record_price(const FlightOffer& offer) {
             result.previous_lowest         = select.column_double(0);
             result.previous_departure_date = select.column_text(1);
             result.previous_return_date    = select.column_text(2);
+            stored_baseline                = select.column_double(3);
         }
     }
 
@@ -261,10 +287,14 @@ PriceUpdate Database::record_price(const FlightOffer& offer) {
         result.first_sighting = true;
 
         Statement insert(db_,
+            // alert_baseline starts at the first price ever seen (?3 again), so
+            // a route that only ever drifts downwards still accumulates toward
+            // the threshold rather than waiting for a first alert to set it.
             "INSERT INTO routes (origin, destination, lowest_price, currency,"
             "                    departure_date, return_date, booking_link,"
-            "                    first_seen, last_checked, lowest_seen_at) "
-            "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?8)");
+            "                    first_seen, last_checked, lowest_seen_at,"
+            "                    alert_baseline) "
+            "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?8, ?3)");
 
         insert.bind(1, offer.origin)
               .bind(2, offer.destination)
@@ -278,6 +308,18 @@ PriceUpdate Database::record_price(const FlightOffer& offer) {
 
     } else {
         result.new_low = offer.price < (result.previous_lowest - kPriceEpsilon);
+
+        // The baseline is pinned until an alert moves it, so repeated small
+        // declines add up instead of resetting the yardstick every time the
+        // record falls. The fallback covers rows written before the column
+        // existed. See PriceUpdate::alert_baseline.
+        result.alert_baseline =
+            stored_baseline > 0.0 ? stored_baseline : result.previous_lowest;
+
+        if (result.alert_baseline > 0.0) {
+            result.drop_percent =
+                ((result.alert_baseline - offer.price) / result.alert_baseline) * 100.0;
+        }
 
         if (result.new_low) {
             // The dates move with the price: the record belongs to whichever

@@ -46,6 +46,7 @@ struct Config {
     int         min_nights       = 2;
     int         max_nights       = 4;
     double      price_cap        = 100.0;              // only alert below this
+    double      min_drop_percent = 10.0;               // and only on a drop this big
     int         interval_seconds = 21600;              // 6 hours
     bool        dry_run          = false;
     bool        run_once         = false;
@@ -92,6 +93,8 @@ Config load_config(int argc, char** argv) {
                 config.price_cap = doc["price_cap"].get<double>();
             if (doc.contains("search_days") && doc["search_days"].is_number_integer())
                 config.search_days = doc["search_days"].get<int>();
+            if (doc.contains("min_drop_percent") && doc["min_drop_percent"].is_number())
+                config.min_drop_percent = doc["min_drop_percent"].get<double>();
             if (doc.contains("min_nights") && doc["min_nights"].is_number_integer())
                 config.min_nights = doc["min_nights"].get<int>();
             if (doc.contains("max_nights") && doc["max_nights"].is_number_integer())
@@ -124,6 +127,9 @@ Config load_config(int argc, char** argv) {
         else if (arg.rfind("--cap=", 0) == 0) {
             try { config.price_cap = std::stod(arg.substr(6)); }
             catch (const std::exception&) { std::cerr << "warning: bad --cap\n"; }
+        } else if (arg.rfind("--min-drop=", 0) == 0) {
+            try { config.min_drop_percent = std::stod(arg.substr(11)); }
+            catch (const std::exception&) { std::cerr << "warning: bad --min-drop\n"; }
         } else if (arg.rfind("--interval=", 0) == 0) {
             try { config.interval_seconds = std::stoi(arg.substr(11)); }
             catch (const std::exception&) { std::cerr << "warning: bad --interval\n"; }
@@ -144,6 +150,7 @@ Config load_config(int argc, char** argv) {
                 "  --test-alert       send one sample alert to Telegram and exit\n"
                 "  --mock             use the built-in payload, make no network calls\n"
                 "  --cap=EUR          only alert below this price (default 100)\n"
+                "  --min-drop=N       only alert on a drop of at least N% (default 10)\n"
                 "  --origins=A,B,C    override the German airports to sweep\n"
                 "  --interval=N       seconds between sweeps (default 21600)\n\n"
                 "environment:\n"
@@ -202,6 +209,7 @@ struct CycleStats {
     int alerts   = 0;
     int failed_alerts = 0;
     int below_cap     = 0;
+    int small_drops   = 0;   // new lows held back for not clearing --min-drop
 };
 
 // The endpoint constrains dates and trip length server-side, so these travel
@@ -246,20 +254,30 @@ void handle_offer(const Config& config, db::Database& store,
 
     if (offer.price <= config.price_cap) ++stats.below_cap;
 
-    // Two conditions, deliberately. A record low above the cap is real but not
-    // worth waking you for; a cheap price that is not a record has already been
-    // alerted on.
+    // Three conditions, deliberately. A record low above the cap is real but
+    // not worth waking you for; a cheap price that is not a record has already
+    // been alerted on; and a record low a couple of euros under the last one is
+    // noise that would train you to ignore the channel.
     if (!update.new_low || offer.price > config.price_cap) return;
+
+    if (update.drop_percent < config.min_drop_percent) {
+        ++stats.small_drops;
+        return;
+    }
 
     log() << "  ALERT " << offer.origin << "->" << offer.destination
           << " (" << offer.destination_city << ")  "
-          << money(update.previous_lowest, offer.currency) << " -> "
+          << money(update.alert_baseline, offer.currency) << " -> "
           << money(update.current_price, offer.currency)
-          << "  " << offer.departure_date;
+          << " (-" << std::fixed << std::setprecision(0) << update.drop_percent
+          << "%)  " << offer.departure_date;
     if (!offer.return_date.empty()) std::cout << " +" << offer.nights() << "n";
     std::cout << '\n';
 
+    // A dry run reports what it would have sent, so move the baseline as a real
+    // send would -- otherwise every dry run re-reports the same drop.
     if (config.dry_run) {
+        store.mark_alerted(offer.origin, offer.destination, offer.price);
         ++stats.alerts;
         return;
     }
@@ -268,6 +286,9 @@ void handle_offer(const Config& config, db::Database& store,
         notify::send_price_drop_alert(config.alerts, offer, update);
 
     if (sent.ok) {
+        // Only now does the baseline move: a drop nobody was told about must
+        // stay pending, or a failed send would silently swallow it.
+        store.mark_alerted(offer.origin, offer.destination, offer.price);
         ++stats.alerts;
     } else {
         // The new low is already committed, so we will not re-alert for it. A
@@ -489,6 +510,8 @@ int main(int argc, char** argv) {
     log() << "  window   : next " << config.search_days << " days, "
           << config.min_nights << '-' << config.max_nights << " nights\n";
     log() << "  cap      : " << money(config.price_cap, "EUR") << '\n';
+    log() << "  min drop : " << std::fixed << std::setprecision(0)
+          << config.min_drop_percent << "% below the last alerted price\n";
     log() << "  region   : " << geo::size() << " countries in Europe\n";
     log() << "  database : " << config.database_path << '\n';
     log() << "  mode     : " << (config.dry_run ? "dry run (nothing is sent)" : "live") << '\n';
@@ -519,6 +542,12 @@ int main(int argc, char** argv) {
                       << stats.skipped << " malformed, "
                       << stats.below_cap << " under cap, "
                       << stats.alerts << " alerts";
+                // Appended rather than inserted: the sweep line up to "alerts"
+                // is asserted verbatim in CI, and a new field in the middle of
+                // it would fail the smoke test for no real reason.
+                if (stats.small_drops > 0) {
+                    std::cout << ", " << stats.small_drops << " below threshold";
+                }
                 if (stats.failed_alerts > 0) {
                     std::cout << ", " << stats.failed_alerts << " undelivered";
                 }

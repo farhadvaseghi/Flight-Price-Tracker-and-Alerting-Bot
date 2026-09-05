@@ -105,7 +105,15 @@ jobs:
           # list changes. The mock payload holds five fares: two usable (Malaga
           # under the cap, Athens over it), one outside the region, one with no
           # price and one with no arrival airport.
-          output=$(${{ matrix.binary }} --once --dry-run --mock --origins=CGN)
+          # A throwaway database, because the repo now ships flights.db with
+          # real price history in it. Against that file the counts below depend
+          # on whatever the last scheduled sweep happened to record: the moment
+          # a sweep stores a CGN-AGP price above the mock's 88.99, the mock
+          # becomes a new low, fires an alert, and this test goes red with
+          # nothing actually broken. A fresh file makes the run deterministic.
+          rm -f ci-smoke.db
+          output=$(FLIGHT_TRACKER_DB=ci-smoke.db \
+                   ${{ matrix.binary }} --once --dry-run --mock --origins=CGN)
           echo "$output"
 
           expected="1 calls, 2 offers, 1 filtered, 2 malformed, 1 under cap, 0 alerts"
@@ -125,6 +133,20 @@ jobs:
 
           echo "$output" | grep -q "shutting down cleanly" \
             || { echo "::error::did not shut down cleanly"; exit 1; }
+
+          # The alert gate is three conditions now, and the threshold is the one
+          # with no other coverage: assert it is actually in force rather than
+          # silently defaulting to 0, which would let every new low through.
+          echo "$output" | grep -qE "min drop : [0-9]+% below" \
+            || { echo "::error::min-drop threshold did not load"; exit 1; }
+
+          # A route already at its floor must stay silent on a re-run. This is
+          # the regression that matters: an alert repeating every six hours for
+          # a price that has not moved is what trains you to mute the channel.
+          repeat=$(FLIGHT_TRACKER_DB=ci-smoke.db \
+                   ${{ matrix.binary }} --once --dry-run --mock --origins=CGN)
+          echo "$repeat" | grep -q "0 alerts" \
+            || { echo "::error::re-alerted on an unchanged price"; exit 1; }
 
       - name: Upload binary
         uses: actions/upload-artifact@v4

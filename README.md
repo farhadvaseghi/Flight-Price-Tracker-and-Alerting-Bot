@@ -4,7 +4,8 @@
 
 Sweeps German airports for cheap return trips around Europe, remembers the
 lowest price ever seen for each city pair in SQLite, and pings a Telegram
-channel when a new low lands under your price cap.
+channel when a new low lands under your price cap and is meaningfully cheaper
+than the last price you were told about.
 
 Fares come from **Ryanair's public fare finder** -- the JSON endpoint their own
 website calls. It needs no API key, no account and no signup, which is what
@@ -69,6 +70,7 @@ flight_tracker --probe
 | `--probe`         | one live API call, dumped raw                   |
 | `--test-alert`    | send one sample alert to Telegram and exit      |
 | `--cap=EUR`       | only alert below this price (default 100)       |
+| `--min-drop=N`    | only alert on a drop of at least N% (default 10)|
 | `--origins=A,B,C` | override the German airports to sweep           |
 | `--interval=N`    | seconds between sweeps (default 21600, min 10)  |
 
@@ -82,6 +84,7 @@ Configuration is layered, later sources winning:
 | Database       | `database_path`             | `FLIGHT_TRACKER_DB`    |
 | Origins        | `origins`                   | —                      |
 | Price cap      | `price_cap`                 | —                      |
+| Drop threshold | `min_drop_percent`          | —                      |
 | Date window    | `search_days`               | —                      |
 | Trip length    | `min_nights` / `max_nights` | —                      |
 | Interval       | `interval_seconds`          | —                      |
@@ -125,6 +128,24 @@ they could ever alert.
 
 The dates behind the record price are stored as metadata and move with it,
 so an alert can show both the new trip and the one it beat.
+
+### Why the drop threshold has its own baseline
+
+An alert needs three things: a new record low, a price under the cap, and a drop
+of at least `min_drop_percent`. That last one is measured against
+`alert_baseline` -- the price you were last told about -- and **not** against
+`lowest_price`.
+
+The distinction matters. `lowest_price` is overwritten by every new low, whether
+or not it was worth a message. Measuring the threshold against it would compare
+each drop only with the drop before it, so a fare sliding 3% per sweep would
+clear 10% on no single step and stay silent the whole way down while losing a
+third of its price. Pinning the baseline until an alert actually fires makes
+those small steps accumulate, so the threshold means *"cheaper than when you
+last heard from me"* -- which is what someone setting one actually wants.
+
+The baseline moves only on a delivered message. A failed send leaves it where it
+was, so the drop stays pending rather than being silently swallowed.
 
 ## Testing
 

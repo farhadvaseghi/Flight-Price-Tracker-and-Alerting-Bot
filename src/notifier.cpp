@@ -146,9 +146,13 @@ SendResult post_json(const std::string& url, const std::string& payload) {
 
 std::string build_price_drop_message(const FlightOffer&     offer,
                                      const db::PriceUpdate& update) {
-    const double saving  = update.previous_lowest - update.current_price;
-    const double percent =
-        update.previous_lowest > 0.0 ? (saving / update.previous_lowest) * 100.0 : 0.0;
+    // Quote the saving against the same baseline the threshold was judged on,
+    // otherwise a message sent for clearing 10% could display a smaller figure
+    // and read as a bug. The two are identical until a first alert is sent.
+    const double baseline =
+        update.alert_baseline > 0.0 ? update.alert_baseline : update.previous_lowest;
+    const double saving  = baseline - update.current_price;
+    const double percent = baseline > 0.0 ? (saving / baseline) * 100.0 : 0.0;
 
     std::ostringstream out;
     out << std::fixed << std::setprecision(0);
@@ -164,7 +168,7 @@ std::string build_price_drop_message(const FlightOffer&     offer,
     out << "</b>\n";
 
     out << "<b>" << html_escape(money(update.current_price, offer.currency)) << "</b>"
-        << "  (was " << html_escape(money(update.previous_lowest, offer.currency))
+        << "  (was " << html_escape(money(baseline, offer.currency))
         << ", save " << html_escape(money(saving, offer.currency))
         << " / " << percent << "%)\n";
 
