@@ -45,4 +45,30 @@ SendResult send_price_drop_alert(const Telegram&        target,
 std::string build_price_drop_message(const FlightOffer&     offer,
                                      const db::PriceUpdate& update);
 
+// One message listing the cheapest routes already stored.
+//
+// Exists because every route tracked before first sightings were announced was
+// seeded in silence, so those fares would otherwise never be mentioned -- each
+// would have to fall further before it said anything at all. `total_under_cap`
+// is the full count, so the digest can admit what it left out.
+//
+// Speaks in IATA codes: the table holds no city names, because those arrive
+// with a live offer and were never worth a column.
+// Returns one or more messages, because 20 routes do not fit in one.
+//
+// A booking deep link is about 230 characters and Telegram caps a message at
+// 4096, so a full digest runs to roughly 6000 and would be truncated -- mid-tag,
+// which the HTML parser then rejects outright, losing the whole message rather
+// than the tail. Splitting on a route boundary keeps every chunk valid.
+std::vector<std::string> build_digest_messages(
+    const std::vector<db::Database::RouteSnapshot>& routes,
+    int                                             total_under_cap,
+    double                                          cap);
+
+// Sends each chunk in order, stopping at the first failure.
+SendResult send_digest(const Telegram&                                 target,
+                       const std::vector<db::Database::RouteSnapshot>& routes,
+                       int                                             total_under_cap,
+                       double                                          cap);
+
 }  // namespace notify

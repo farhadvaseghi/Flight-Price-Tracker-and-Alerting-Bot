@@ -242,4 +242,74 @@ SendResult send_price_drop_alert(const Telegram&        target,
     return send_telegram_message(target, build_price_drop_message(offer, update));
 }
 
+std::vector<std::string> build_digest_messages(
+    const std::vector<db::Database::RouteSnapshot>& routes,
+    int                                             total_under_cap,
+    double                                          cap) {
+    // Well under kTelegramTextMax: the header, footer and one more route all
+    // have to fit after the check that decides whether to start a new chunk.
+    constexpr std::size_t kChunkBudget = 3400;
+
+    std::ostringstream header;
+    header << "\xE2\x9C\x88\xEF\xB8\x8F <b>Cheapest routes already tracked</b>\n"
+           << "under " << html_escape(money(cap, "EUR"));
+    if (total_under_cap > static_cast<int>(routes.size())) {
+        header << " \xE2\x80\x94 showing " << routes.size() << " of " << total_under_cap;
+    }
+    header << "\n\n";
+
+    if (routes.empty()) {
+        return {header.str() + "Nothing under the cap yet."};
+    }
+
+    std::vector<std::string> chunks;
+    std::string              current = header.str();
+
+    for (const db::Database::RouteSnapshot& route : routes) {
+        std::ostringstream line;
+        line << "<b>" << html_escape(money(route.price, route.currency)) << "</b>  "
+             << "<code>" << html_escape(route.origin) << '-'
+             << html_escape(route.destination) << "</code>";
+
+        if (!route.departure_date.empty()) {
+            line << "  " << html_escape(route.departure_date);
+            if (!route.return_date.empty()) {
+                line << " \xE2\x86\x92 " << html_escape(route.return_date);
+            }
+        }
+        if (!route.booking_link.empty()) {
+            line << "  <a href=\"" << html_escape(route.booking_link) << "\">book</a>";
+        }
+        line << '\n';
+
+        // Split on a route boundary, never inside one: a chunk cut mid-tag is
+        // rejected by Telegram's HTML parser and the whole message is lost.
+        if (current.size() + line.str().size() > kChunkBudget) {
+            chunks.push_back(current);
+            current = "<b>...continued</b>\n\n";
+        }
+        current += line.str();
+    }
+
+    // These are recorded lows, not live quotes -- some will have moved since
+    // the sweep that stored them. Saying so beats looking wrong.
+    current += "\nPrices are the lowest seen so far and may have changed.";
+    chunks.push_back(current);
+
+    return chunks;
+}
+
+SendResult send_digest(const Telegram&                                 target,
+                       const std::vector<db::Database::RouteSnapshot>& routes,
+                       int                                             total_under_cap,
+                       double                                          cap) {
+    SendResult result;
+    for (const std::string& chunk :
+             build_digest_messages(routes, total_under_cap, cap)) {
+        result = send_telegram_message(target, chunk);
+        if (!result.ok) return result;
+    }
+    return result;
+}
+
 }  // namespace notify

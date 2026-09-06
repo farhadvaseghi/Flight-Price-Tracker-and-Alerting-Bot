@@ -250,6 +250,38 @@ void Database::mark_alerted(const std::string& origin,
     update.step();
 }
 
+std::vector<Database::RouteSnapshot>
+Database::cheapest_under_cap(double cap, int limit) const {
+    std::vector<RouteSnapshot> rows;
+
+    Statement select(db_,
+        "SELECT origin, destination, currency, departure_date, return_date,"
+        "       booking_link, lowest_price "
+        "FROM routes WHERE lowest_price <= ?1 "
+        "ORDER BY lowest_price ASC LIMIT ?2");
+    select.bind(1, cap).bind(2, static_cast<double>(limit));
+
+    while (select.step()) {
+        RouteSnapshot row;
+        row.origin         = select.column_text(0);
+        row.destination    = select.column_text(1);
+        row.currency       = select.column_text(2);
+        row.departure_date = select.column_text(3);
+        row.return_date    = select.column_text(4);
+        row.booking_link   = select.column_text(5);
+        row.price          = select.column_double(6);
+        rows.push_back(std::move(row));
+    }
+
+    return rows;
+}
+
+int Database::count_under_cap(double cap) const {
+    Statement count(db_, "SELECT COUNT(*) FROM routes WHERE lowest_price <= ?1");
+    count.bind(1, cap);
+    return count.step() ? static_cast<int>(count.column_double(0)) : 0;
+}
+
 int Database::route_count() const {
     Statement count(db_, "SELECT COUNT(*) FROM routes");
     return count.step() ? static_cast<int>(count.column_double(0)) : 0;

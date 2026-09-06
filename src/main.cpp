@@ -57,6 +57,7 @@ struct Config {
     bool        run_once         = false;
     bool        probe            = false;              // one live call, dump it
     bool        test_alert       = false;              // send one fake alert
+    int         digest           = 0;                  // >0: catch-up digest size
 };
 
 std::string env_or(const char* name, const std::string& fallback) {
@@ -138,6 +139,11 @@ Config load_config(int argc, char** argv) {
         else if (arg.rfind("--cap=", 0) == 0) {
             try { config.price_cap = std::stod(arg.substr(6)); }
             catch (const std::exception&) { std::cerr << "warning: bad --cap\n"; }
+        } else if (arg == "--digest") {
+            config.digest = 20;
+        } else if (arg.rfind("--digest=", 0) == 0) {
+            try { config.digest = std::stoi(arg.substr(9)); }
+            catch (const std::exception&) { std::cerr << "warning: bad --digest\n"; }
         } else if (arg.rfind("--min-drop=", 0) == 0) {
             try { config.min_drop_percent = std::stod(arg.substr(11)); }
             catch (const std::exception&) { std::cerr << "warning: bad --min-drop\n"; }
@@ -162,6 +168,8 @@ Config load_config(int argc, char** argv) {
                 "  --mock             use the built-in payload, make no network calls\n"
                 "  --cap=EUR          only alert below this price (default 100)\n"
                 "  --min-drop=N       later drops must be at least N% (default 0, off)\n"
+                "  --digest[=N]       post one message listing the N cheapest\n"
+                "                     routes already stored, then exit (N=20)\n"
                 "  --origins=A,B,C    override the German airports to sweep\n"
                 "  --interval=N       seconds between sweeps (default 21600)\n\n"
                 "environment:\n"
@@ -400,6 +408,75 @@ void interruptible_sleep(int seconds) {
 // Sends one fabricated alert, so the Telegram side can be confirmed working
 // without waiting for a real price drop. Exercises the whole delivery path:
 // token, chat id, the bot's permission to post, and HTML rendering.
+// One-off: announce what is already stored under the cap.
+//
+// Needed because every route seeded before first sightings were announced sits
+// in the database unmentioned, and under the normal rule it would stay that way
+// until it fell further. This says it once, in a single message, rather than
+// firing a hundred separate alerts.
+//
+// The listed routes have their alert baseline moved to the price shown, so if
+// the drop threshold is switched on later it measures from what you were
+// actually told here. Routes not listed are left untouched.
+int run_digest(const Config& config) {
+    try {
+        db::Database store(config.database_path);
+        store.initialize();
+
+        const int total = store.count_under_cap(config.price_cap);
+        const std::vector<db::Database::RouteSnapshot> routes =
+            store.cheapest_under_cap(config.price_cap, config.digest);
+
+        log() << "digest: " << routes.size() << " of " << total
+              << " routes under " << money(config.price_cap, "EUR") << '\n';
+
+        if (routes.empty()) {
+            log() << "nothing to announce\n";
+            return 0;
+        }
+
+        const std::vector<std::string> messages =
+            notify::build_digest_messages(routes, total, config.price_cap);
+
+        if (config.dry_run) {
+            for (std::size_t i = 0; i < messages.size(); ++i) {
+                std::cout << "\n--- message " << (i + 1) << " of " << messages.size()
+                          << " (" << messages[i].size() << " bytes) ---\n"
+                          << messages[i] << '\n';
+            }
+            log() << "dry run: nothing sent\n";
+            return 0;
+        }
+
+        if (!config.alerts.configured()) {
+            std::cerr << "--digest needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID\n";
+            return 1;
+        }
+
+        const notify::SendResult sent =
+            notify::send_digest(config.alerts, routes, total, config.price_cap);
+
+        if (!sent.ok) {
+            log() << "digest delivery FAILED (" << sent.status_code << "): "
+                  << sent.error << '\n';
+            return 1;
+        }
+
+        // Only after delivery: an undelivered digest must not move baselines,
+        // for the same reason a failed alert does not.
+        for (const db::Database::RouteSnapshot& route : routes) {
+            store.mark_alerted(route.origin, route.destination, route.price);
+        }
+
+        log() << "digest delivered, " << routes.size() << " baselines updated\n";
+        return 0;
+
+    } catch (const db::Error& e) {
+        std::cerr << "database error: " << e.what() << '\n';
+        return 1;
+    }
+}
+
 int run_test_alert(const Config& config) {
     if (!config.alerts.configured()) {
         std::cerr << "--test-alert needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID\n";
@@ -524,6 +601,7 @@ int main(int argc, char** argv) {
 
     if (config.test_alert) return run_test_alert(config);
     if (config.probe)      return run_probe(config);
+    if (config.digest > 0) return run_digest(config);
 
     log() << "flight tracker starting\n";
     log() << "  source   : " << (config.flights.use_mock

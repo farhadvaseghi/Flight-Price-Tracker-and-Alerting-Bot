@@ -71,6 +71,7 @@ flight_tracker --probe
 | `--test-alert`    | send one sample alert to Telegram and exit      |
 | `--cap=EUR`       | only alert below this price (default 100)       |
 | `--min-drop=N`    | later drops must be at least N% (default 0, off)|
+| `--digest[=N]`    | post the N cheapest stored routes once, then exit|
 | `--origins=A,B,C` | override the German airports to sweep           |
 | `--interval=N`    | seconds between sweeps (default 21600, min 10)  |
 

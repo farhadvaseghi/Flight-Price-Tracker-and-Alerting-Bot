@@ -3,6 +3,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "flight.h"
 
@@ -69,6 +70,30 @@ public:
     void mark_alerted(const std::string& origin,
                       const std::string& destination,
                       double             price);
+
+    // One stored route, for the catch-up digest.
+    //
+    // City and country names are absent because the table does not hold them:
+    // they arrive with a live offer and were never worth a column. The digest
+    // therefore speaks in IATA codes, same as the compact line in an alert.
+    struct RouteSnapshot {
+        std::string origin;
+        std::string destination;
+        std::string currency;
+        std::string departure_date;
+        std::string return_date;
+        std::string booking_link;
+        double      price = 0.0;
+    };
+
+    // The cheapest stored routes at or below `cap`, dearest last, at most
+    // `limit` of them. Used once, to announce what was seeded before first
+    // sightings were announced.
+    std::vector<RouteSnapshot> cheapest_under_cap(double cap, int limit) const;
+
+    // How many stored routes sit at or below `cap`, so the digest can say what
+    // it is not showing.
+    int count_under_cap(double cap) const;
 
     // The cheapest price ever seen for a city pair, or nullopt if never seen.
     std::optional<double> lowest_price(const std::string& origin,
