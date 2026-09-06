@@ -46,7 +46,7 @@ struct Config {
     int         min_nights       = 2;
     int         max_nights       = 4;
     double      price_cap        = 100.0;              // only alert below this
-    double      min_drop_percent = 10.0;               // and only on a drop this big
+    double      min_drop_percent = 5.0;                // and only on a drop this big
     int         interval_seconds = 21600;              // 6 hours
     bool        dry_run          = false;
     bool        run_once         = false;
@@ -156,7 +156,7 @@ Config load_config(int argc, char** argv) {
                 "  --test-alert       send one sample alert to Telegram and exit\n"
                 "  --mock             use the built-in payload, make no network calls\n"
                 "  --cap=EUR          only alert below this price (default 100)\n"
-                "  --min-drop=N       only alert on a drop of at least N% (default 10)\n"
+                "  --min-drop=N       later drops must be at least N% (default 5)\n"
                 "  --origins=A,B,C    override the German airports to sweep\n"
                 "  --interval=N       seconds between sweeps (default 21600)\n\n"
                 "environment:\n"
@@ -260,23 +260,35 @@ void handle_offer(const Config& config, db::Database& store,
 
     if (offer.price <= config.price_cap) ++stats.below_cap;
 
-    // Three conditions, deliberately. A record low above the cap is real but
-    // not worth waking you for; a cheap price that is not a record has already
-    // been alerted on; and a record low a couple of euros under the last one is
-    // noise that would train you to ignore the channel.
-    if (!update.new_low || offer.price > config.price_cap) return;
+    // Two ways to earn a message, and the cap gates both.
+    //
+    //   1. The first time a city pair is seen at all, if it is under the cap.
+    //      There is no history to compare against, and staying silent would
+    //      mean a route that appears at 40 EUR is never mentioned until it
+    //      somehow gets cheaper still.
+    //   2. Afterwards, only a new record low that is at least
+    //      min_drop_percent below the price you were last told about.
+    if (offer.price > config.price_cap) return;
 
-    if (update.drop_percent < config.min_drop_percent) {
-        ++stats.small_drops;
-        return;
+    if (!update.first_sighting) {
+        if (!update.new_low) return;
+        if (update.drop_percent < config.min_drop_percent) {
+            ++stats.small_drops;
+            return;
+        }
     }
 
     log() << "  ALERT " << offer.origin << "->" << offer.destination
-          << " (" << offer.destination_city << ")  "
-          << money(update.alert_baseline, offer.currency) << " -> "
-          << money(update.current_price, offer.currency)
-          << " (-" << std::fixed << std::setprecision(0) << update.drop_percent
-          << "%)  " << offer.departure_date;
+          << " (" << offer.destination_city << ")  ";
+    if (update.first_sighting) {
+        std::cout << "new route at " << money(offer.price, offer.currency);
+    } else {
+        std::cout << money(update.alert_baseline, offer.currency) << " -> "
+                  << money(update.current_price, offer.currency)
+                  << " (-" << std::fixed << std::setprecision(0)
+                  << update.drop_percent << "%)";
+    }
+    std::cout << "  " << offer.departure_date;
     if (!offer.return_date.empty()) std::cout << " +" << offer.nights() << "n";
     std::cout << '\n';
 
@@ -516,8 +528,9 @@ int main(int argc, char** argv) {
     log() << "  window   : next " << config.search_days << " days, "
           << config.min_nights << '-' << config.max_nights << " nights\n";
     log() << "  cap      : " << money(config.price_cap, "EUR") << '\n';
-    log() << "  min drop : " << std::fixed << std::setprecision(0)
-          << config.min_drop_percent << "% below the last alerted price\n";
+    log() << "  rule     : first sighting under the cap, then a drop of "
+          << std::fixed << std::setprecision(0) << config.min_drop_percent
+          << "% below the last alerted price\n";
     log() << "  region   : " << geo::size() << " countries in Europe\n";
     log() << "  database : " << config.database_path << '\n';
     log() << "  mode     : " << (config.dry_run ? "dry run (nothing is sent)" : "live") << '\n';

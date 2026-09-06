@@ -4,8 +4,8 @@
 
 Sweeps German airports for cheap return trips around Europe, remembers the
 lowest price ever seen for each city pair in SQLite, and pings a Telegram
-channel when a new low lands under your price cap and is meaningfully cheaper
-than the last price you were told about.
+channel the first time a city pair appears under your price cap, and after that
+only when it falls meaningfully further.
 
 Fares come from **Ryanair's public fare finder** -- the JSON endpoint their own
 website calls. It needs no API key, no account and no signup, which is what
@@ -70,7 +70,7 @@ flight_tracker --probe
 | `--probe`         | one live API call, dumped raw                   |
 | `--test-alert`    | send one sample alert to Telegram and exit      |
 | `--cap=EUR`       | only alert below this price (default 100)       |
-| `--min-drop=N`    | only alert on a drop of at least N% (default 10)|
+| `--min-drop=N`    | later drops must be at least N% (default 5)     |
 | `--origins=A,B,C` | override the German airports to sweep           |
 | `--interval=N`    | seconds between sweeps (default 21600, min 10)  |
 
@@ -131,8 +131,15 @@ so an alert can show both the new trip and the one it beat.
 
 ### Why the drop threshold has its own baseline
 
-An alert needs three things: a new record low, a price under the cap, and a drop
-of at least `min_drop_percent`. That last one is measured against
+There are two ways to earn a message, and the price cap gates both:
+
+1. **The first time** a city pair is seen at all, if it is under the cap. There
+   is no history to compare against, and staying silent would mean a route that
+   appears at 40 EUR is never mentioned until it somehow gets cheaper still.
+2. **Afterwards**, only a new record low at least `min_drop_percent` below the
+   price you were last told about.
+
+That second condition is measured against
 `alert_baseline` -- the price you were last told about -- and **not** against
 `lowest_price`.
 

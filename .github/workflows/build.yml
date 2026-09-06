@@ -116,7 +116,10 @@ jobs:
                    ${{ matrix.binary }} --once --dry-run --mock --origins=CGN)
           echo "$output"
 
-          expected="1 calls, 2 offers, 1 filtered, 2 malformed, 1 under cap, 0 alerts"
+          # Malaga is a first sighting under the cap, so on a fresh database it
+          # alerts. That is the rule: a route is announced the first time it is
+          # seen cheap, then only on a further drop.
+          expected="1 calls, 2 offers, 1 filtered, 2 malformed, 1 under cap, 1 alerts"
           echo "$output" | grep -q "$expected" \
             || { echo "::error::sweep result changed; expected: $expected"; exit 1; }
 
@@ -137,8 +140,8 @@ jobs:
           # The alert gate is three conditions now, and the threshold is the one
           # with no other coverage: assert it is actually in force rather than
           # silently defaulting to 0, which would let every new low through.
-          echo "$output" | grep -qE "min drop : [0-9]+% below" \
-            || { echo "::error::min-drop threshold did not load"; exit 1; }
+          echo "$output" | grep -qE "rule     : first sighting under the cap, then a drop of [0-9]+%" \
+            || { echo "::error::alert rule did not load"; exit 1; }
 
           # A route already at its floor must stay silent on a re-run. This is
           # the regression that matters: an alert repeating every six hours for

@@ -167,10 +167,17 @@ std::string build_price_drop_message(const FlightOffer&     offer,
     }
     out << "</b>\n";
 
-    out << "<b>" << html_escape(money(update.current_price, offer.currency)) << "</b>"
-        << "  (was " << html_escape(money(baseline, offer.currency))
-        << ", save " << html_escape(money(saving, offer.currency))
-        << " / " << percent << "%)\n";
+    out << "<b>" << html_escape(money(update.current_price, offer.currency)) << "</b>";
+    if (update.first_sighting) {
+        // Nothing to compare against yet, so quoting a saving would be a lie.
+        // Say plainly that this is a route we have not seen before.
+        out << "  (new route)";
+    } else {
+        out << "  (was " << html_escape(money(baseline, offer.currency))
+            << ", save " << html_escape(money(saving, offer.currency))
+            << " / " << percent << "%)";
+    }
+    out << '\n';
 
     out << "\xF0\x9F\x93\x85 " << html_escape(offer.departure_date);
     if (!offer.return_date.empty()) {
