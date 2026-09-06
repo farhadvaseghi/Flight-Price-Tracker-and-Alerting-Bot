@@ -140,7 +140,10 @@ jobs:
           # The alert gate is three conditions now, and the threshold is the one
           # with no other coverage: assert it is actually in force rather than
           # silently defaulting to 0, which would let every new low through.
-          echo "$output" | grep -qE "rule     : first sighting under the cap, then a drop of [0-9]+%" \
+          # Matches whether the threshold is on or off -- the tail of this line
+          # changes with --min-drop, and pinning the disabled wording would fail
+          # the build the day it is switched back on.
+          echo "$output" | grep -qE "rule     : first sighting under the cap, then " \
             || { echo "::error::alert rule did not load"; exit 1; }
 
           # A route already at its floor must stay silent on a re-run. This is

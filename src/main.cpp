@@ -46,7 +46,12 @@ struct Config {
     int         min_nights       = 2;
     int         max_nights       = 4;
     double      price_cap        = 100.0;              // only alert below this
-    double      min_drop_percent = 5.0;                // and only on a drop this big
+    // 0 disables the threshold: every new low alerts, which is the behaviour
+    // before it existed. The machinery behind it stays live either way -- the
+    // alert baseline is still tracked and still moves only on a delivered
+    // message -- so raising this to 5 or 10 turns it straight back on with no
+    // loss of history and nothing to rebuild.
+    double      min_drop_percent = 0.0;
     int         interval_seconds = 21600;              // 6 hours
     bool        dry_run          = false;
     bool        run_once         = false;
@@ -156,7 +161,7 @@ Config load_config(int argc, char** argv) {
                 "  --test-alert       send one sample alert to Telegram and exit\n"
                 "  --mock             use the built-in payload, make no network calls\n"
                 "  --cap=EUR          only alert below this price (default 100)\n"
-                "  --min-drop=N       later drops must be at least N% (default 5)\n"
+                "  --min-drop=N       later drops must be at least N% (default 0, off)\n"
                 "  --origins=A,B,C    override the German airports to sweep\n"
                 "  --interval=N       seconds between sweeps (default 21600)\n\n"
                 "environment:\n"
@@ -528,9 +533,13 @@ int main(int argc, char** argv) {
     log() << "  window   : next " << config.search_days << " days, "
           << config.min_nights << '-' << config.max_nights << " nights\n";
     log() << "  cap      : " << money(config.price_cap, "EUR") << '\n';
-    log() << "  rule     : first sighting under the cap, then a drop of "
-          << std::fixed << std::setprecision(0) << config.min_drop_percent
-          << "% below the last alerted price\n";
+    log() << "  rule     : first sighting under the cap, then ";
+    if (config.min_drop_percent > 0.0) {
+        std::cout << "a drop of " << std::fixed << std::setprecision(0)
+                  << config.min_drop_percent << "% below the last alerted price\n";
+    } else {
+        std::cout << "any new low (threshold off, --min-drop=N to enable)\n";
+    }
     log() << "  region   : " << geo::size() << " countries in Europe\n";
     log() << "  database : " << config.database_path << '\n';
     log() << "  mode     : " << (config.dry_run ? "dry run (nothing is sent)" : "live") << '\n';

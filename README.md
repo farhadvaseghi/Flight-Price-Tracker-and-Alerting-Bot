@@ -70,7 +70,7 @@ flight_tracker --probe
 | `--probe`         | one live API call, dumped raw                   |
 | `--test-alert`    | send one sample alert to Telegram and exit      |
 | `--cap=EUR`       | only alert below this price (default 100)       |
-| `--min-drop=N`    | later drops must be at least N% (default 5)     |
+| `--min-drop=N`    | later drops must be at least N% (default 0, off)|
 | `--origins=A,B,C` | override the German airports to sweep           |
 | `--interval=N`    | seconds between sweeps (default 21600, min 10)  |
 
@@ -136,8 +136,14 @@ There are two ways to earn a message, and the price cap gates both:
 1. **The first time** a city pair is seen at all, if it is under the cap. There
    is no history to compare against, and staying silent would mean a route that
    appears at 40 EUR is never mentioned until it somehow gets cheaper still.
-2. **Afterwards**, only a new record low at least `min_drop_percent` below the
-   price you were last told about.
+2. **Afterwards**, a new record low -- and if `min_drop_percent` is set, only
+   when it is at least that far below the price you were last told about.
+
+`min_drop_percent` defaults to **0, meaning the threshold is off**: every new
+low alerts. Set it to 5 or 10 (`--min-drop=5`, or `min_drop_percent` in
+`config.json`) to quieten the channel. The machinery behind it runs either way
+-- the baseline below is always tracked and only ever moves on a delivered
+message -- so switching it on later costs nothing and loses no history.
 
 That second condition is measured against
 `alert_baseline` -- the price you were last told about -- and **not** against
