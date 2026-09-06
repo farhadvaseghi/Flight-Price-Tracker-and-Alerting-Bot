@@ -3,7 +3,7 @@
 
   "telegram_chat_id": "@your_channel_name",
 
-  "origins": ["BER", "CGN", "HHN", "NUE", "FMM", "HAM", "FKB", "FMO", "PAD", "BRE"],
+  "origins": ["BER", "CGN", "HHN", "NUE", "FMM", "HAM", "FKB", "FMO", "PAD", "BRE", "NRN"],
 
   "price_cap": 100,
   "min_drop_percent": 10,

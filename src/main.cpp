@@ -62,9 +62,15 @@ std::string env_or(const char* name, const std::string& fallback) {
 // German airports Ryanair actually flies from, verified against the live
 // endpoint. Frankfurt, Munich, Dusseldorf and Stuttgart are deliberately
 // absent: Ryanair does not serve them, so querying them returns nothing and
-// only costs requests.
+// only costs requests. The same probe rejected DTM, LEJ, DRS, RLG and ERF.
+//
+// NRN (Weeze) is a full Ryanair base and was simply missed the first time:
+// it returns a page of fares cheaper than anything the other ten produce.
+// SCN and FDH also work but carry two or three routes each, so they are left
+// out -- a request per sweep for a couple of destinations that Alicante and
+// Palma already cover from elsewhere.
 std::vector<std::string> default_origins() {
-    return {"BER", "CGN", "HHN", "NUE", "FMM", "HAM", "FKB", "FMO", "PAD", "BRE"};
+    return {"BER", "CGN", "HHN", "NUE", "FMM", "HAM", "FKB", "FMO", "PAD", "BRE", "NRN"};
 }
 
 // Precedence: built-in defaults < config.json < environment < CLI flags.
