@@ -211,6 +211,8 @@ void Database::initialize() {
         "  last_checked   TEXT NOT NULL,"
         "  lowest_seen_at TEXT NOT NULL,"
         "  alert_baseline REAL NOT NULL DEFAULT 0,"       // what drops are measured from
+        "  departure_time TEXT NOT NULL DEFAULT '',"      // "HH:MM", may be empty
+        "  return_time    TEXT NOT NULL DEFAULT '',"
         "  UNIQUE (origin, destination)"
         ")");
 
@@ -227,7 +229,16 @@ void Database::initialize() {
         exec("UPDATE routes SET alert_baseline = lowest_price");
     }
 
-    exec("PRAGMA user_version = 3");
+    // v3 -> v4 adds the leg departure times. Widening again, so rows are kept:
+    // the existing records predate the times being parsed at all, and an empty
+    // string is honest about that where "00:00" would read as a real midnight
+    // departure. They fill in as each route is next seen.
+    if (current == 2 || current == 3) {
+        exec("ALTER TABLE routes ADD COLUMN departure_time TEXT NOT NULL DEFAULT ''");
+        exec("ALTER TABLE routes ADD COLUMN return_time    TEXT NOT NULL DEFAULT ''");
+    }
+
+    exec("PRAGMA user_version = 4");
 }
 
 std::optional<double> Database::lowest_price(const std::string& origin,
@@ -256,7 +267,7 @@ Database::cheapest_under_cap(double cap, int limit) const {
 
     Statement select(db_,
         "SELECT origin, destination, currency, departure_date, return_date,"
-        "       booking_link, lowest_price "
+        "       booking_link, lowest_price, departure_time, return_time "
         "FROM routes WHERE lowest_price <= ?1 "
         "ORDER BY lowest_price ASC LIMIT ?2");
     select.bind(1, cap).bind(2, static_cast<double>(limit));
@@ -270,6 +281,8 @@ Database::cheapest_under_cap(double cap, int limit) const {
         row.return_date    = select.column_text(4);
         row.booking_link   = select.column_text(5);
         row.price          = select.column_double(6);
+        row.departure_time = select.column_text(7);
+        row.return_time    = select.column_text(8);
         rows.push_back(std::move(row));
     }
 
@@ -325,8 +338,8 @@ PriceUpdate Database::record_price(const FlightOffer& offer) {
             "INSERT INTO routes (origin, destination, lowest_price, currency,"
             "                    departure_date, return_date, booking_link,"
             "                    first_seen, last_checked, lowest_seen_at,"
-            "                    alert_baseline) "
-            "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?8, ?3)");
+            "                    alert_baseline, departure_time, return_time) "
+            "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?8, ?3, ?9, ?10)");
 
         insert.bind(1, offer.origin)
               .bind(2, offer.destination)
@@ -335,7 +348,9 @@ PriceUpdate Database::record_price(const FlightOffer& offer) {
               .bind(5, offer.departure_date)
               .bind(6, offer.return_date)
               .bind(7, offer.booking_link)
-              .bind(8, now);
+              .bind(8, now)
+              .bind(9, offer.departure_time)
+              .bind(10, offer.return_time);
         insert.step();
 
     } else {
@@ -360,7 +375,8 @@ PriceUpdate Database::record_price(const FlightOffer& offer) {
                 "UPDATE routes SET lowest_price = ?3, currency = ?4,"
                 "                  departure_date = ?5, return_date = ?6,"
                 "                  booking_link = ?7, last_checked = ?8,"
-                "                  lowest_seen_at = ?8 "
+                "                  lowest_seen_at = ?8,"
+                "                  departure_time = ?9, return_time = ?10 "
                 "WHERE origin = ?1 AND destination = ?2");
 
             update.bind(1, offer.origin)
@@ -370,7 +386,9 @@ PriceUpdate Database::record_price(const FlightOffer& offer) {
                   .bind(5, offer.departure_date)
                   .bind(6, offer.return_date)
                   .bind(7, offer.booking_link)
-                  .bind(8, now);
+                  .bind(8, now)
+                  .bind(9, offer.departure_time)
+                  .bind(10, offer.return_time);
             update.step();
         } else {
             // Price held or rose: remember that we looked, nothing else.

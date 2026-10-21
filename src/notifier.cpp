@@ -179,10 +179,18 @@ std::string build_price_drop_message(const FlightOffer&     offer,
     }
     out << '\n';
 
+    // Clock times sit next to their dates: for a two-to-four night trip they
+    // decide whether the offer is worth anything, and the price cannot say so.
     out << "\xF0\x9F\x93\x85 " << html_escape(offer.departure_date);
+    if (!offer.departure_time.empty()) {
+        out << ' ' << html_escape(offer.departure_time);
+    }
     if (!offer.return_date.empty()) {
-        out << " \xE2\x86\x92 " << html_escape(offer.return_date)
-            << "  (" << offer.nights() << " nights)";
+        out << " \xE2\x86\x92 " << html_escape(offer.return_date);
+        if (!offer.return_time.empty()) {
+            out << ' ' << html_escape(offer.return_time);
+        }
+        out << "  (" << offer.nights() << " nights)";
     }
     out << '\n';
 
@@ -273,8 +281,14 @@ std::vector<std::string> build_digest_messages(
 
         if (!route.departure_date.empty()) {
             line << "  " << html_escape(route.departure_date);
+            if (!route.departure_time.empty()) {
+                line << ' ' << html_escape(route.departure_time);
+            }
             if (!route.return_date.empty()) {
                 line << " \xE2\x86\x92 " << html_escape(route.return_date);
+                if (!route.return_time.empty()) {
+                    line << ' ' << html_escape(route.return_time);
+                }
             }
         }
         if (!route.booking_link.empty()) {

@@ -31,6 +31,17 @@ struct SearchParams {
     int         max_nights = 4;
     std::string currency   = "EUR";
     int         offset     = 0;      // paging: 0, 20, 40, ...
+
+    // Clock-time window for each leg, "HH:MM". Applied by the endpoint, not by
+    // us, which matters: a page holds only 20 fares, so discarding
+    // badly-timed ones after the fact would spend the page budget on offers we
+    // were always going to throw away. Verified against the live endpoint --
+    // filtering out<=14:00 / in>=14:00 returned 16 fares where an unfiltered
+    // call returned 17, because the filter runs across the whole date window.
+    std::string outbound_time_from = "00:00";
+    std::string outbound_time_to   = "14:00";
+    std::string inbound_time_from  = "14:00";
+    std::string inbound_time_to    = "23:59";
 };
 
 // The endpoint rejects any limit above this, so paging is not optional.

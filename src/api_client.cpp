@@ -61,6 +61,20 @@ std::string date_part(const std::string& timestamp) {
     return date;
 }
 
+// The clock time from the same "2026-09-28T22:00:00" shape. Returns "" rather
+// than guessing, so a missing time shows as absent instead of as midnight --
+// which would read as a real 00:00 departure.
+std::string time_part(const std::string& timestamp) {
+    if (timestamp.size() < 16) return "";
+    if (timestamp[10] != 'T' || timestamp[13] != ':') return "";
+    const std::string clock = timestamp.substr(11, 5);
+    for (std::size_t i = 0; i < clock.size(); ++i) {
+        if (i == 2) continue;
+        if (clock[i] < '0' || clock[i] > '9') return "";
+    }
+    return clock;
+}
+
 }  // namespace
 
 // Ryanair's booking page accepts the trip as query parameters, so an alert can
@@ -89,6 +103,10 @@ std::string fetch_flight_data(const Settings& settings, const SearchParams& para
             {"inboundDepartureDateTo",    params.latest_departure},
             {"durationFrom", std::to_string(params.min_nights)},
             {"durationTo",   std::to_string(params.max_nights)},
+            {"outboundDepartureTimeFrom", params.outbound_time_from},
+            {"outboundDepartureTimeTo",   params.outbound_time_to},
+            {"inboundDepartureTimeFrom",  params.inbound_time_from},
+            {"inboundDepartureTimeTo",    params.inbound_time_to},
             {"currency", params.currency},
             {"limit",  std::to_string(kPageSize)},
             {"offset", std::to_string(params.offset)},
@@ -134,8 +152,8 @@ std::string mock_flight_data() {
 
     return std::string(R"({"arrivalAirportCategories":null,"fares":[)") +
 
-        R"({"outbound":)" + leg(cgn, agp, out1 + "T22:00:00", "FR2308") +
-        R"(,"inbound":)"  + leg(agp, cgn, in1 + "T21:20:00", "FR2307") +
+        R"({"outbound":)" + leg(cgn, agp, out1 + "T09:20:00", "FR2308") +
+        R"(,"inbound":)"  + leg(agp, cgn, in1 + "T18:45:00", "FR2307") +
         R"(,"summary":{"price":{"value":88.99,"currencyCode":"EUR"},"tripDurationDays":3}},)" +
 
         R"({"outbound":)" + leg(cgn, ath, out2 + "T06:00:00", "FR8801") +
@@ -234,8 +252,13 @@ ParseResult parse_flight_offers(const std::string& payload) {
             continue;
         }
 
-        offer.departure_date = date_part(string_or(outbound, "departureDate", ""));
-        offer.return_date    = date_part(string_or(inbound, "departureDate", ""));
+        const std::string outbound_stamp = string_or(outbound, "departureDate", "");
+        const std::string inbound_stamp  = string_or(inbound, "departureDate", "");
+
+        offer.departure_date = date_part(outbound_stamp);
+        offer.return_date    = date_part(inbound_stamp);
+        offer.departure_time = time_part(outbound_stamp);
+        offer.return_time    = time_part(inbound_stamp);
 
         if (offer.departure_date.empty()) {
             result.problems.emplace_back(label + " " + offer.destination +

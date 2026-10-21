@@ -83,6 +83,8 @@ public:
         std::string departure_date;
         std::string return_date;
         std::string booking_link;
+        std::string departure_time;   // "HH:MM", empty for rows predating v4
+        std::string return_time;
         double      price = 0.0;
     };
 

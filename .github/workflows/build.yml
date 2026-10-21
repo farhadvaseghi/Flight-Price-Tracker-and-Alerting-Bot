@@ -146,6 +146,20 @@ jobs:
           echo "$output" | grep -qE "rule     : first sighting under the cap, then " \
             || { echo "::error::alert rule did not load"; exit 1; }
 
+          # The time window is enforced by the fare endpoint, so the only thing
+          # testable offline is the local backstop. It matters: the endpoint is
+          # undocumented, and if it ever ignored the time parameters a 20:50
+          # departure would otherwise flow through and become a record low.
+          echo "$output" | grep -qE "times    : out by [0-9]{2}:[0-9]{2}, back after" \
+            || { echo "::error::time window did not load"; exit 1; }
+
+          strict=$(FLIGHT_TRACKER_DB=ci-strict.db \
+                   ${{ matrix.binary }} --once --dry-run --mock --origins=CGN \
+                   --latest-outbound=08:00)
+          rm -f ci-strict.db
+          echo "$strict" | grep -q "2 filtered, 2 malformed, 0 under cap, 0 alerts" \
+            || { echo "::error::time backstop did not reject a late departure"; exit 1; }
+
           # A route already at its floor must stay silent on a re-run. This is
           # the regression that matters: an alert repeating every six hours for
           # a price that has not moved is what trains you to mute the channel.

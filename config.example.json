@@ -7,10 +7,13 @@
 
   "price_cap": 100,
   "min_drop_percent": 0,
+
+  "latest_outbound_time": "14:00",
+  "earliest_return_time": "14:00",
   "search_days": 90,
   "min_nights": 2,
   "max_nights": 4,
 
-  "interval_seconds": 21600,
+  "interval_seconds": 14400,
   "database_path": "flights.db"
 }

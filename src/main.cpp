@@ -52,7 +52,12 @@ struct Config {
     // message -- so raising this to 5 or 10 turns it straight back on with no
     // loss of history and nothing to rebuild.
     double      min_drop_percent = 0.0;
-    int         interval_seconds = 21600;              // 6 hours
+    // A short trip is won or lost on the clock, not the calendar: leaving at
+    // 20:50 and returning at 06:45 buys nights in a hotel and no days away.
+    // Out by midday, back in the afternoon, is the shape worth alerting on.
+    std::string latest_outbound_time = "14:00";   // outbound departs by this
+    std::string earliest_return_time = "14:00";   // return departs after this
+    int         interval_seconds = 14400;             // 4 hours, matching track.yml
     bool        dry_run          = false;
     bool        run_once         = false;
     bool        probe            = false;              // one live call, dump it
@@ -105,6 +110,10 @@ Config load_config(int argc, char** argv) {
                 config.price_cap = doc["price_cap"].get<double>();
             if (doc.contains("search_days") && doc["search_days"].is_number_integer())
                 config.search_days = doc["search_days"].get<int>();
+            if (doc.contains("latest_outbound_time") && doc["latest_outbound_time"].is_string())
+                config.latest_outbound_time = doc["latest_outbound_time"].get<std::string>();
+            if (doc.contains("earliest_return_time") && doc["earliest_return_time"].is_string())
+                config.earliest_return_time = doc["earliest_return_time"].get<std::string>();
             if (doc.contains("min_drop_percent") && doc["min_drop_percent"].is_number())
                 config.min_drop_percent = doc["min_drop_percent"].get<double>();
             if (doc.contains("min_nights") && doc["min_nights"].is_number_integer())
@@ -144,6 +153,10 @@ Config load_config(int argc, char** argv) {
         } else if (arg.rfind("--digest=", 0) == 0) {
             try { config.digest = std::stoi(arg.substr(9)); }
             catch (const std::exception&) { std::cerr << "warning: bad --digest\n"; }
+        } else if (arg.rfind("--latest-outbound=", 0) == 0) {
+            config.latest_outbound_time = arg.substr(18);
+        } else if (arg.rfind("--earliest-return=", 0) == 0) {
+            config.earliest_return_time = arg.substr(18);
         } else if (arg.rfind("--min-drop=", 0) == 0) {
             try { config.min_drop_percent = std::stod(arg.substr(11)); }
             catch (const std::exception&) { std::cerr << "warning: bad --min-drop\n"; }
@@ -170,8 +183,10 @@ Config load_config(int argc, char** argv) {
                 "  --min-drop=N       later drops must be at least N% (default 0, off)\n"
                 "  --digest[=N]       post one message listing the N cheapest\n"
                 "                     routes already stored, then exit (N=20)\n"
+                "  --latest-outbound=HH:MM  outbound must depart by this (14:00)\n"
+                "  --earliest-return=HH:MM  return must depart after this (14:00)\n"
                 "  --origins=A,B,C    override the German airports to sweep\n"
-                "  --interval=N       seconds between sweeps (default 21600)\n\n"
+                "  --interval=N       seconds between sweeps (default 10800)\n\n"
                 "environment:\n"
                 "  TELEGRAM_BOT_TOKEN    bot token from @BotFather\n"
                 "  TELEGRAM_CHAT_ID      channel (@name) or numeric chat id\n"
@@ -244,6 +259,10 @@ api::SearchParams params_for(const Config& config, const std::string& origin,
     params.max_nights         = config.max_nights;
     params.currency           = "EUR";
     params.offset             = offset;
+    // Applied by the endpoint, not after the fact: a page is only 20 fares, so
+    // filtering locally would spend the budget on offers we would discard.
+    params.outbound_time_to   = config.latest_outbound_time;
+    params.inbound_time_from  = config.earliest_return_time;
     return params;
 }
 
@@ -260,6 +279,24 @@ constexpr int kPauseBetweenCallsMs = 250;
 // Stores one offer and alerts if it is a new low worth reporting.
 void handle_offer(const Config& config, db::Database& store,
                   const FlightOffer& offer, CycleStats& stats) {
+    // The endpoint already filters on these, so this is a backstop rather than
+    // the mechanism. It earns its place twice over: the endpoint is
+    // undocumented and has form for ignoring a parameter it dislikes -- it
+    // answers an out-of-range `limit` with a 200 and a complaint in the body --
+    // and an offer outside the window must not reach the store either, or a
+    // 20:50 departure we would never book becomes the record low that real
+    // offers are then measured against. "HH:MM" compares correctly as text.
+    if (!offer.departure_time.empty() &&
+        offer.departure_time > config.latest_outbound_time) {
+        ++stats.filtered;
+        return;
+    }
+    if (!offer.return_time.empty() &&
+        offer.return_time < config.earliest_return_time) {
+        ++stats.filtered;
+        return;
+    }
+
     db::PriceUpdate update;
     try {
         update = store.record_price(offer);
@@ -610,6 +647,8 @@ int main(int argc, char** argv) {
     log() << "  origins  : " << config.origins.size() << " German airports\n";
     log() << "  window   : next " << config.search_days << " days, "
           << config.min_nights << '-' << config.max_nights << " nights\n";
+    log() << "  times    : out by " << config.latest_outbound_time
+          << ", back after " << config.earliest_return_time << '\n';
     log() << "  cap      : " << money(config.price_cap, "EUR") << '\n';
     log() << "  rule     : first sighting under the cap, then ";
     if (config.min_drop_percent > 0.0) {

@@ -19,6 +19,14 @@ struct FlightOffer {
     std::string destination_country;  // "Spain"
     std::string departure_date;  // ISO-8601 date, "YYYY-MM-DD"
     std::string return_date;     // empty for a one-way offer
+
+    // Local departure clock time of each leg, "HH:MM", empty if unparseable.
+    // Carried because a short trip lives or dies on these: an outbound at 20:50
+    // and a return at 06:45 is a priced offer with no day at the destination in
+    // it, and the price alone cannot tell you that.
+    std::string departure_time;
+    std::string return_time;
+
     std::string currency;        // ISO-4217, e.g. "EUR"
     double      price = 0.0;     // total for the whole trip
     std::string booking_link;    // constructed, may be empty

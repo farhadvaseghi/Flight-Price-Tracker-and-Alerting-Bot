@@ -2,10 +2,16 @@ name: track
 
 on:
   schedule:
-    # Every 6 hours. With 10 origins and up to 5 pages each that is at most
-    # 200 requests a sweep, paced 250ms apart, against an endpoint that owes us
-    # nothing. Raising the frequency or the origin count multiplies that.
-    - cron: "0 */6 * * *"
+    # Every 4 hours: 6 sweeps a day. With 11 origins and up to 5 pages each
+    # that is at most 55 requests a sweep, paced 250ms apart, so about 330 a
+    # day against a free undocumented endpoint that owes us nothing.
+    #
+    # 4 rather than the 3 that was asked for, deliberately. Fares on a 90-day
+    # window do not move on a 3-hour timescale, so the extra daily sweep buys
+    # almost no freshness and costs a third more requests on the one source
+    # the whole project depends on. Change to "0 */3 * * *" for 3-hourly if the
+    # responsiveness turns out to matter.
+    - cron: "0 */4 * * *"
   workflow_dispatch:      # manual "run now" button
     inputs:
       dry_run:

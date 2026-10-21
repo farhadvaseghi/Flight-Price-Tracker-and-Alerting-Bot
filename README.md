@@ -72,6 +72,8 @@ flight_tracker --probe
 | `--cap=EUR`       | only alert below this price (default 100)       |
 | `--min-drop=N`    | later drops must be at least N% (default 0, off)|
 | `--digest[=N]`    | post the N cheapest stored routes once, then exit|
+| `--latest-outbound=HH:MM` | outbound must depart by this (14:00)    |
+| `--earliest-return=HH:MM` | return must depart after this (14:00)   |
 | `--origins=A,B,C` | override the German airports to sweep           |
 | `--interval=N`    | seconds between sweeps (default 21600, min 10)  |
 
@@ -86,6 +88,8 @@ Configuration is layered, later sources winning:
 | Origins        | `origins`                   | —                      |
 | Price cap      | `price_cap`                 | —                      |
 | Drop threshold | `min_drop_percent`          | —                      |
+| Outbound by    | `latest_outbound_time`      | —                      |
+| Return after   | `earliest_return_time`      | —                      |
 | Date window    | `search_days`               | —                      |
 | Trip length    | `min_nights` / `max_nights` | —                      |
 | Interval       | `interval_seconds`          | —                      |
@@ -129,6 +133,27 @@ they could ever alert.
 
 The dates behind the record price are stored as metadata and move with it,
 so an alert can show both the new trip and the one it beat.
+
+### Departure times are part of the filter
+
+A two-to-four night trip is won or lost on the clock. An outbound at 20:50 with
+a return at 06:45 is a real priced offer with no day at the destination in it,
+and the price alone cannot tell you that. So the outbound must leave by
+`latest_outbound_time` and the return must leave after `earliest_return_time`,
+both 14:00 by default.
+
+The fare endpoint applies this itself, via `outboundDepartureTimeTo` and
+`inboundDepartureTimeFrom`, which is the whole point: a page holds only 20
+fares, so filtering after fetching would spend the page budget on offers that
+were always going to be discarded. Verified against the live endpoint --
+filtering returned 16 fares where an unfiltered call returned 17, because the
+filter runs across the whole date window rather than over one page.
+
+`handle_offer` re-checks both times anyway. The endpoint is undocumented and
+has form for ignoring a parameter it dislikes -- it answers an out-of-range
+`limit` with a 200 and a complaint in the body -- and an offer outside the
+window must not reach the store either, or a departure nobody would book
+becomes the record low that real offers are measured against.
 
 ### Why the drop threshold has its own baseline
 
